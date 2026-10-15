@@ -1,0 +1,424 @@
+# Contributing
+
+Join the [#mesh-llm channel on the Goose Discord](https://discord.gg/goose-oss) for discussion and questions.
+
+This file covers local build and development workflows for this repository.
+
+## Prerequisites
+
+- `just`
+- `cmake`
+- Rust toolchain (`cargo`)
+- `sccache` (required by the repository Cargo configuration)
+- Node.js 24 + pnpm 10 or newer (for UI development). The UI lockfile keeps
+  `overrides` in `pnpm-workspace.yaml`, which pnpm 9 does not read, so pnpm 9
+  cannot install it. `corepack pnpm@10` is enough if your host pnpm is older.
+
+Install the pinned compiler cache and the platform linkers with:
+
+```bash
+just bootstrap-build-tools
+```
+
+The bootstrap installs sccache 0.16.0. On Linux it also installs mold and lld
+with the detected system package manager; on macOS it installs lld with
+Homebrew. On Windows it installs the Rust LLVM tools with rustup. Set
+`MESH_LLM_SCCACHE_VERSION` only when deliberately testing a newer cache binary.
+
+**macOS**: Apple Silicon. Metal is used automatically. Install the accelerated
+linker with `brew install lld`; the repository probes `ld64.lld` against the
+active SDK and uses Apple ld when that installed version is incompatible.
+
+**Linux**: install `mold` and `lld`. Cargo uses mold by default and retains lld
+as the diagnosed compatibility fallback. On Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y mold lld
+```
+
+**Linux NVIDIA**: x86_64 with an NVIDIA GPU. Requires the CUDA toolkit (`nvcc` in your `PATH`). On Arch Linux, CUDA is typically at `/opt/cuda`; on Ubuntu/Debian it's at `/usr/local/cuda`. Auto-detection finds the right SM architecture for your GPU.
+
+**Linux AMD**: ROCm/HIP is supported when ROCm is installed. Typical installs expose `hipcc`, `hipconfig`, and `rocm-smi` under `/opt/rocm/bin`.
+
+**Linux Vulkan**: Vulkan is supported when the Vulkan development files and `glslc` are installed. On Ubuntu/Debian, install `libvulkan-dev glslc`. On Arch Linux, install `vulkan-headers shaderc`.
+
+**Windows**: native runtime builds support `cuda`, `hip`/`rocm`, `vulkan`, or
+`cpu`. Metal is not supported on Windows. Install the Rust lld tools with
+`rustup component add llvm-tools-preview`, or install LLVM with `winget install
+LLVM.LLVM`.
+
+## Build from source
+
+Build both debug products in order: patched llama.cpp and the standalone
+Skippy CLI with a locally packaged runtime, then the backend-neutral MeshLLM
+host and console:
+
+```bash
+just
+```
+
+This produces `target/debug/skippy`, `target/debug/native-runtimes/`, and
+`target/debug/mesh-llm`. Pass `--runtime-bundle target/debug/native-runtimes`
+when running Skippy; MeshLLM discovers the adjacent runtime itself.
+Use `just skippy` when working only on the complete standalone Skippy product,
+or `just mesh` to rebuild only MeshLLM. `just build` runs the same sequence
+as bare `just`; `just skippy-cli-build` builds only Skippy's CLI.
+
+Release and packaging use the same host/runtime boundary. The only lower-level
+static compilation primitive is runtime packaging; it never builds a host.
+For explicit local stages, build the backend runtime you are changing first:
+
+```bash
+just release-runtime-build cpu
+just release-runtime-build metal
+just release-runtime-build cuda
+just release-runtime-build rocm
+just release-runtime-build vulkan
+```
+
+Backend toolchains must be available for the corresponding runtime build. For
+NVIDIA on Linux, put `nvcc` on `PATH`; runtime packaging detects the selected
+CUDA major and architecture from the toolchain/environment.
+
+```bash
+PATH=/opt/cuda/bin:$PATH just release-runtime-build cuda
+# or
+PATH=/usr/local/cuda/bin:$PATH just release-runtime-build cuda
+```
+
+Then build the standalone Skippy CLI, followed by the neutral MeshLLM host
+and console once. The same host can be composed with any compatible backend
+runtime:
+
+```bash
+just skippy-cli-release-build
+just release-host-build
+```
+
+Exercise the exact release discovery boundary with an isolated cache:
+
+```bash
+runtime_cache="$(mktemp -d)"
+MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$PWD/dist/native-runtimes" \
+MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$runtime_cache" \
+  ./target/release/mesh-llm runtime list
+```
+
+The resolver validates version, Skippy ABI, OS, architecture, and backend. It
+does not search the current working directory or copy a matching bundled
+runtime into the user cache.
+
+Create a portable product bundle after building both layers:
+
+```bash
+just release-bundle v0.X.0 dist
+```
+
+## UI development workflow
+
+The React console and embedded asset crate live in `mesh/crates/mesh-llm-ui/`.
+The host binary serves the built assets through the management API.
+
+Use this two-terminal flow for UI development.
+
+Terminal A (run `mesh-llm` yourself):
+
+```bash
+mesh-llm --port 9337 --console 3131
+```
+
+If `mesh-llm` is not on your `PATH`:
+
+```bash
+./target/release/mesh-llm --port 9337 --console 3131
+```
+
+Terminal B (run Vite with HMR):
+
+```bash
+just ui-dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+`ui-dev` defaults:
+
+- Serves on `127.0.0.1:5173`
+- Proxies `/api/*` to `http://127.0.0.1:3131`
+
+Overrides:
+
+```bash
+# Different backend API origin for /api proxy
+just ui-dev http://127.0.0.1:4141
+
+# Different Vite dev port
+just ui-dev http://127.0.0.1:3131 5174
+```
+
+## Useful commands
+
+```bash
+just stop             # stop mesh/rpc/llama processes
+just test             # quick test against :9337
+just check-release    # release-target/docs/workflow parity check
+just compat-smoke ~/.cache/huggingface/hub/<model>.gguf   # optional 2-node + 1-client Python/Node/LiteLLM smoke
+just --list           # list all recipes
+```
+
+On macOS and Linux, local Cargo artifacts are bounded independently from the sccache
+compiler-object cache, which here keeps sccache's own 10 GiB local default. That default is
+a developer-machine limit only -- CI does not use it, and pins a 2 GiB trusted seed instead
+(`SCCACHE_CACHE_SIZE=2G`, see `.github/actions/restore-sccache-seed`). Inspect and prune the
+local Cargo artifacts with:
+
+```bash
+just cache-status
+just cache-prune-dry-run max_size=80GiB max_age=14
+just cache-prune max_size=80GiB max_age=14
+```
+
+Pruning evicts the oldest incremental sessions first, then uses
+`cargo clean -p` for old or size-dominant workspace packages. It is scoped to
+this worktree's `target/` and reports before/after bytes. On macOS and Linux,
+`just build` and `just build-dev` hold a shared lock for their full build while
+cache status and dry-run pruning take the same lock in shared mode. Executed
+pruning requires the corresponding exclusive lock before measuring or deleting
+artifacts. Direct Cargo and lower-level build commands do not share that lock,
+so pruning also refuses to run when it detects an active Cargo or Rust compiler
+process as a best-effort safeguard. Cargo configurations that separate
+`build.build-dir` from `target-dir` are rejected because the cache manager does
+not report, lock, or clean a second artifact tree.
+
+On native Windows, `just check-release` runs the host-safe Rust/doc invariant subset and skips the Bash-only `install.sh` / `package-release.sh` parity checks. Run it on macOS or Linux when you need full shell parity coverage.
+
+### Line endings on native Windows
+
+`.gitattributes` checks every text file out with LF on every platform. A
+checkout created before that landed, with `core.autocrlf=true`, keeps its CRLF
+working copy until the files are re-extracted, and five host-runtime tests
+still fail locally on content they read verbatim: both `config_schema`
+snapshots, the `plugin::config` fixture, `inference::skippy::topology`, which
+greps its own source, and `inference::skippy::split_certification`, whose
+`build.rs` patch-queue digest is hashed from the bytes of the llama.cpp
+patches and gates production split certification rather than tests alone.
+
+Renormalise once, after committing or stashing anything in progress, since the
+second command discards uncommitted work:
+
+```powershell
+git rm --cached -r .
+git reset --hard HEAD
+```
+
+`git ls-files --eol` should then report `i/lf w/lf` for every text file. A
+fresh clone needs none of this.
+
+### Testing crates on native Windows
+
+A bare Windows checkout cannot build the test targets of crates that pull in
+`skippy-ffi`'s static link mode (`mesh-llm-system` does, through
+`skippy-runtime-install`, which depends on `skippy-ffi` with
+`default-features = false`), because `skippy-ffi/build.rs` then requires
+the llama.cpp ABI archives to be prepared
+(`automatic native preparation is not supported for Windows from build.rs yet`).
+`just test-all` needs the same native preparation, through its Bash pipeline.
+
+For crate suites that do not exercise the native runtime, enable
+`dynamic-native-runtime`: feature unification turns on `skippy-ffi`'s
+`dynamic-runtime`, whose build script returns early. The `mesh-llm-system`
+gates then run on a machine without a prepared native build:
+
+```powershell
+cargo test --locked -p mesh-llm-system --lib --features dynamic-native-runtime
+cargo clippy --no-deps -p mesh-llm-system --all-targets --features dynamic-native-runtime -- -D warnings
+cargo fmt --check -p mesh-llm-system
+cargo run -p xtask -- repo-consistency no-console-print
+```
+
+`--no-deps` keeps Clippy scoped to the package you are changing. `cfg`-gated
+code can be dead on one platform only, so if a platform-specific warning
+appears that your diff does not touch, compare the run against the same
+command on `main` before attributing it to your change. Running the
+native-runtime suites still needs a prepared build (`LLAMA_STAGE_BUILD_DIR`
+or `SKIPPY_LLAMA_BUILD_DIR` pointing at one), which this section does not cover.
+The Rust MSVC toolchain needs the Visual Studio Build Tools with the
+"Desktop development with C++" workload installed.
+
+## Commit messages
+
+Commit subjects follow [Conventional Commits
+v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+
+```
+<type>(<optional scope>)<optional !>: <description>
+```
+
+Install the hook that enforces it:
+
+```bash
+just hooks-install          # sets core.hooksPath to scripts/hooks
+just check-commits          # validates origin/main..HEAD
+```
+
+Git cannot activate a committed hook on clone — that would make `git clone` of
+any repository arbitrary code execution — so the hook needs one local opt-in.
+`just build` enables it for you on the first local development build, on every
+platform, unless you have already pointed `core.hooksPath` somewhere yourself.
+CI enforces the same rules regardless, so a clone that never builds is still
+covered.
+
+Valid types are `feat`, `fix`, `perf`, `security`, `revert`, `refactor`,
+`style`, `test`, `build`, `deps`, `ci`, `chore`, and `docs`. This is not
+bookkeeping: the release-notes job classifies each release entry from these
+subjects, so the type decides which section a change appears under. `feat`
+lands in Added, `fix` in Fixed, `perf` in Changed, `security` in Security, and
+the tooling types collapse into a folded Internal section. A subject that is
+not conventional cannot be classified and lands in "Other changes".
+
+Two overrides exist. `BREAKING CHANGE: <what>` in the body (or `!` after the
+type) moves the entry to Changed, whatever its type. `Release-Notes: <Section>` in the body wins
+outright — reach for it when the type cannot express the change, above all for
+a fix that closes a security exposure and belongs in Security rather than
+Fixed.
+
+Because the repository squash-merges, the PR title becomes the commit subject
+on `main`. Give the PR the conventional title, not just the branch commits.
+
+The hook is opt-in per clone, so CI is what actually enforces this. The Quality
+lane rejects a pull request whose title is not conventional, and rejects any
+branch commit carrying a denied attribution trailer, because the squash body
+aggregates those messages. Branch commit *subjects* are not judged in CI --
+messy work-in-progress subjects are fine, since only the title survives the
+squash.
+
+See [`.agents/skills/release-notes/SKILL.md`](.agents/skills/release-notes/SKILL.md)
+for the full pipeline.
+
+### Attribution trailers
+
+Agent, bot, and relay attribution trailers are not kept in this history. The
+hook rejects a commit whose trailers name an agent or bot, use an agent
+attribution address such as `noreply@anthropic.com`, sit at a relay identity
+domain such as `meshllm.communities.buzz.xyz`, or belong to a `[bot]` account:
+
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>          # rejected
+Co-authored-by: scama <a1860575018c46@meshllm.communities.buzz.xyz>  # rejected
+Co-authored-by: coderabbitai[bot] <...@users.noreply.github.com>     # rejected
+Co-authored-by: Real Person <real@example.com>                  # kept
+```
+
+Trailers naming a human contributor are untouched. Extend the lists in
+`tools/xtask/src/repository/conventional_commit/trailers.rs` when a new agent identity shows up.
+
+A squash merge builds the commit on `main` from the pull request title and
+body, both of which CI validates, so a trailer in a branch commit cannot reach
+`main` on its own. Keep them out of branch commits anyway: branch history is
+still read during review, and that protection is a repository setting rather
+than a law of nature. See the CI notes in
+[`.agents/skills/manage-ci/references/current-inventory.md`](.agents/skills/manage-ci/references/current-inventory.md).
+
+
+## CI / GitHub Actions
+
+For the current PR and main topology, read [`ci/ci.md`](ci/ci.md), the
+[optimization spec](.omo/specs/pr-ci-optimization.md), and the canonical
+[`manage-ci` skill](.agents/skills/manage-ci/SKILL.md) before editing CI.
+`.github/AGENTS.md` enforces that sequence.
+
+The current five-way PR/main topology, manual controller, planner profiles,
+and runner/provider/cache policy are documented in [`ci/ci.md`](ci/ci.md),
+especially [Planner and profiles](ci/ci.md#planner-and-profiles) and [Provider
+and cache policy](ci/ci.md#provider-and-cache-policy). The normative rules for
+editing workflows and CI scripts live in the [`manage-ci` skill](.agents/skills/manage-ci/SKILL.md).
+
+When a pull request changes workflow YAML, local actions, planner contracts,
+runner selection, or other CI plumbing, apply the `ci:canary` label to request
+the optional non-required diagnostic. It builds the pull-request merge commit
+through one real hosted Linux amd64 CPU chain (UI artifact, release host,
+native runtime including its runtime-event gate, and product composition).
+The PR head SHA is retained as separate identity evidence. The canary does not
+cover the five required lane orchestrators, macOS, Windows, GPU, SDK, smoke,
+or release paths. The canary lane and runner-policy actions come from protected
+`main`; the merge commit is used only as the product source. Remove the label to
+cancel an active run.
+
+Linux CI uses prebuilt public and self-hosted images from
+[`Mesh-LLM/mesh-llm-runner-images`](https://github.com/Mesh-LLM/mesh-llm-runner-images).
+CPU, Vulkan, versioned CUDA, and versioned ROCm images share a core environment,
+warm dependencies from MeshLLM's checked-in manifests, and allow container
+runtimes to reuse cached layers where the runner host or K3s node retains them
+instead of reinstalling host packages in every job.
+
+If CI is missing a dependency, update the appropriate MeshLLM manifest and
+lockfile or the runner image's YAML profile/installer, then publish the image
+and pin its OCI digest. Do not add a one-off `apt-get`, `pip`, global `npm`,
+`cargo install`, downloaded binary, or similar setup step to an individual
+workflow. Existing workflow-local setup is migration debt, not a pattern for
+new jobs.
+
+### Local validation and extensions
+
+Run the narrow checks that match the change, plus the full contract suite for
+workflow changes:
+
+```bash
+just ci-validate
+```
+
+The canonical complete local gate is `just test-all`; it includes repository
+consistency, Rust formatting, Clippy, Rust tests, UI/docs builds, and E2E smoke.
+Use `just ci-shellcheck <changed-script>...` for changed shell scripts and
+`just check-release` when release-target consistency is in scope. These are the
+complete CI-definition and worktree checks; narrow checks do not replace
+`just test-all` when full repository validation is required.
+
+Planner fixtures and the CI repository-consistency recipes are included in
+`just ci-validate`. Use `just ci-crate-lists`, `just check-release`, or
+`just publish-crates` when iterating on the corresponding narrower contract.
+
+To add coverage, extend one typed reusable slice or local action, update the
+ownership/dependency/row catalog and planner fixtures, preserve immutable
+producer-to-consumer reachability, and add the slice to its lane's stable
+summary. Keep the controller's bounded projection and aggregate check contract
+in sync. Never copy a PR job into an entrypoint or accept a raw runner label.
+Validate the GitHub fallback before any provider rollout.
+
+## GPU benchmark execution
+
+GPU bandwidth benchmarks are launched through the `mesh-llm` binary itself rather than standalone benchmark executables. The public command remains:
+
+```bash
+mesh-llm gpus detect
+```
+
+Internally, mesh-llm runs a hidden `benchmark` subcommand in a narrow subprocess boundary so native backend hangs and stdout capture stay isolated from the main process.
+
+Standard builds support benchmark execution only for the backends wired into the normal build flow:
+
+- macOS Apple Silicon: Metal
+- Linux / Windows NVIDIA: CUDA
+- Linux / Windows AMD: HIP / ROCm
+
+Intel GPU benchmark execution is not currently supported in standard `just build` flows, so runtime benchmark selection intentionally skips Intel GPUs.
+
+## Protocol Backward Compatibility
+
+Any change to `mesh/crates/mesh-llm-host-runtime/src/protocol/` or `mesh/crates/mesh-client/src/protocol/` requires backward-compatibility tests before merging.
+
+Embedded clients (iOS, macOS, Android) are permanently supported. Protocol changes that break embedded client compatibility are breaking changes.
+
+Run the protocol compatibility tests after any protocol change:
+
+```bash
+cargo test -p mesh-llm --test protocol_compat_v0_client
+cargo test -p mesh-llm --test protocol_convert_matrix
+```
+
+See [`mesh/docs/design/EMBEDDED_CLIENT_ADR.md`](mesh/docs/design/EMBEDDED_CLIENT_ADR.md) for the full compatibility policy and rationale.

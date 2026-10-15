@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+load_publish_crates() {
+    crates=()
+    while IFS= read -r crate; do
+        crates+=("$crate")
+    done < <(
+        awk '/^publish_crates=\(/ { inside = 1; next } inside && /^\)/ { exit } inside && /^    [[:alnum:]_-]+$/ { print $1 }' scripts/publish-crates.sh
+    )
+}
+
+load_publish_crates
+
+if [[ "${#crates[@]}" -eq 0 ]]; then
+    echo "No crates found in scripts/publish-crates.sh" >&2
+    exit 1
+fi
+
+echo "Building Rustdoc for ${#crates[@]} published crates"
+
+cargo clean --doc
+
+cargo_args=(doc --locked --no-deps)
+for crate in "${crates[@]}"; do
+    cargo_args+=(--package "$crate")
+done
+cargo "${cargo_args[@]}"
+
+landing_page=""
+if [[ -f docs/crates/index.html ]]; then
+    landing_page="$(mktemp)"
+    cp docs/crates/index.html "$landing_page"
+fi
+
+rm -rf docs/crates
+mkdir -p docs/crates
+cp -R target/doc/. docs/crates/
+
+if [[ -n "$landing_page" ]]; then
+    cp "$landing_page" docs/crates/index.html
+    rm -f "$landing_page"
+fi
+
+echo "Published crate docs to docs/crates/"

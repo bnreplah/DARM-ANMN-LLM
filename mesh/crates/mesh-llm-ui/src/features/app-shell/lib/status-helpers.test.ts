@@ -1,0 +1,216 @@
+import { describe, expect, it, vi } from 'vitest'
+
+import {
+  displayVramGb,
+  formatGpuMemory,
+  formatLiveNodeState,
+  gpuInventoryVramGb,
+  isClientOnlyNode,
+  localRoutableModels,
+  meshGpuVram,
+  normalizeVramGb,
+  overviewVramGb,
+  modelRefLabel,
+  topologyStatusTone,
+  topologyStatusTooltip
+} from '@/features/app-shell/lib/status-helpers'
+import type { LiveNodeState, StatusPayload } from '@/features/app-shell/lib/status-types'
+
+describe('live node state helpers', () => {
+  it('preserves model names exactly', () => {
+    expect(modelRefLabel('unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL')).toBe('unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL')
+    expect(modelRefLabel('tiiuae/Falcon-H1-1.5B-Instruct-GGUF:Q4_K_M')).toBe(
+      'tiiuae/Falcon-H1-1.5B-Instruct-GGUF:Q4_K_M'
+    )
+    expect(modelRefLabel('Hermes-2-Pro-Mistral-7B-Instruct-Q4_K_M')).toBe('Hermes-2-Pro-Mistral-7B-Instruct-Q4_K_M')
+  })
+
+  it('formats all supported live node states', () => {
+    const cases: Array<{
+      state: LiveNodeState
+      label: string
+      tone: 'good' | 'info' | 'warn' | 'bad' | 'neutral'
+      tooltip: string
+    }> = [
+      {
+        state: 'client',
+        label: 'Client',
+        tone: 'info',
+        tooltip: 'Sends requests, but does not contribute VRAM.'
+      },
+      {
+        state: 'standby',
+        label: 'Standby',
+        tone: 'neutral',
+        tooltip: 'Connected, but not currently serving a model.'
+      },
+      {
+        state: 'loading',
+        label: 'Loading',
+        tone: 'warn',
+        tooltip: 'Initializing model work before it can serve requests.'
+      },
+      {
+        state: 'serving',
+        label: 'Serving',
+        tone: 'good',
+        tooltip: 'Actively serving a model.'
+      }
+    ]
+
+    for (const testCase of cases) {
+      expect(formatLiveNodeState(testCase.state)).toBe(testCase.label)
+      expect(topologyStatusTone(testCase.state)).toBe(testCase.tone)
+      expect(topologyStatusTooltip(testCase.state)).toBe(testCase.tooltip)
+    }
+  })
+
+  it('handles invalid states gracefully without throwing', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      expect(formatLiveNodeState(undefined)).toBe('Unknown')
+      expect(formatLiveNodeState(null)).toBe('Unknown')
+
+      expect(topologyStatusTone(undefined)).toBe('neutral')
+      expect(topologyStatusTone(null)).toBe('neutral')
+
+      expect(topologyStatusTooltip(undefined)).toBe('Node state unavailable')
+      expect(topologyStatusTooltip(null)).toBe('Node state unavailable')
+      expect(warnSpy).toHaveBeenCalledTimes(6)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  const baseStatus: StatusPayload = {
+    node_id: 'local-node',
+    node_status: 'Serving',
+    node_state: 'serving',
+    token: 'token',
+    is_host: false,
+    is_client: false,
+    llama_ready: true,
+    peers: [],
+    model_name: 'fallback-model',
+    requested_models: [],
+    available_models: [],
+    serving_models: ['serving-model'],
+    hosted_models: ['hosted-model'],
+    my_vram_gb: 24,
+    api_port: 3131,
+    model_size_gb: 0,
+    inflight_requests: 0,
+    version: 'test',
+    latest_version: null,
+    wakeable_nodes: []
+  }
+
+  it('excludes client nodes from local routable models', () => {
+    expect(localRoutableModels(baseStatus)).toEqual(['hosted-model'])
+    expect(localRoutableModels({ ...baseStatus, is_client: true })).toEqual([])
+    expect(localRoutableModels({ ...baseStatus, node_state: 'client', is_client: false })).toEqual([])
+  })
+
+  it('detects a client-only node from is_client', () => {
+    expect(isClientOnlyNode({ ...baseStatus, is_client: true })).toBe(true)
+  })
+
+  it('detects a client-only node from node_state even when is_client is false', () => {
+    expect(isClientOnlyNode({ ...baseStatus, node_state: 'client', is_client: false })).toBe(true)
+  })
+
+  it('does not treat a host node as client-only', () => {
+    expect(isClientOnlyNode(baseStatus)).toBe(false)
+  })
+
+  it('does not treat unknown status as client-only', () => {
+    expect(isClientOnlyNode(null)).toBe(false)
+    expect(isClientOnlyNode(undefined)).toBe(false)
+  })
+
+  it('prefers advertised capacity over rated GPU inventory for VRAM totals', () => {
+    const physicalVramBytes = 17_094_934_528
+
+    expect(gpuInventoryVramGb([{ vram_bytes: physicalVramBytes }])).toBe(16)
+    expect(displayVramGb(false, 29.4, [{ vram_bytes: physicalVramBytes }])).toBe(29.4)
+  })
+
+  it('falls back to allocatable inventory, then rated class, when no capacity is advertised', () => {
+    expect(displayVramGb(false, 0, [{ vram_bytes: 32_000_000_000, reserved_bytes: 1_000_000_000 }])).toBe(31)
+    expect(displayVramGb(false, undefined, [{ rated_vram_gb: 24 }])).toBe(24)
+  })
+
+  it('prefers explicit rated VRAM when formatting GPU inventory', () => {
+    expect(
+      formatGpuMemory({
+        total_vram_gb: 30.15,
+        rated_vram_gb: 32,
+        vram_bytes: 32_000_000_000
+      })
+    ).toBe('32 GB')
+  })
+
+  it('falls back to capacity VRAM when GPU inventory is absent', () => {
+    expect(displayVramGb(false, 29.4, [])).toBe(29.4)
+    expect(displayVramGb(false, 29.4, undefined)).toBe(29.4)
+    expect(displayVramGb(true, 29.4, [{ vram_bytes: 17_094_934_528 }])).toBe(0)
+  })
+
+  it('normalizes overview VRAM through the shared clamp helper', () => {
+    expect(normalizeVramGb(null)).toBe(0)
+    expect(normalizeVramGb(undefined)).toBe(0)
+    expect(normalizeVramGb(-4)).toBe(0)
+    expect(normalizeVramGb(12.5)).toBe(12.5)
+
+    expect(overviewVramGb(false, -4)).toBe(normalizeVramGb(-4))
+    expect(overviewVramGb(false, 12.5)).toBe(normalizeVramGb(12.5))
+    expect(overviewVramGb(true, 12.5)).toBe(0)
+  })
+
+  it('sums advertised capacity for mesh VRAM totals, matching /api/status', () => {
+    const status: StatusPayload = {
+      node_id: 'local-node',
+      node_status: 'Serving',
+      node_state: 'serving',
+      token: 'token',
+      is_host: true,
+      is_client: false,
+      llama_ready: true,
+      peers: [
+        {
+          id: 'peer-with-inventory',
+          role: 'Host',
+          state: 'serving',
+          models: [],
+          vram_gb: 48,
+          gpus: [{ name: 'GPU', vram_bytes: 12 * 1024 ** 3 }]
+        },
+        {
+          id: 'legacy-peer',
+          role: 'Host',
+          state: 'serving',
+          models: [],
+          vram_gb: 8,
+          gpus: []
+        }
+      ],
+      model_name: 'model',
+      requested_models: [],
+      available_models: [],
+      serving_models: ['model'],
+      hosted_models: ['model'],
+      my_vram_gb: 29.4,
+      gpus: [{ name: 'RTX 5080', vram_bytes: 16 * 1024 ** 3 }],
+      api_port: 3131,
+      model_size_gb: 0,
+      inflight_requests: 0,
+      version: 'test',
+      latest_version: null,
+      wakeable_nodes: []
+    }
+
+    // 29.4 local + 48 + 8 advertised, not the 16 + 12 rated inventory sum.
+    expect(meshGpuVram(status)).toBeCloseTo(85.4, 6)
+  })
+})

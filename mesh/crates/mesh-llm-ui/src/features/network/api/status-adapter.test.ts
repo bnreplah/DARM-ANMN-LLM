@@ -1,0 +1,710 @@
+import { describe, expect, it } from 'vitest'
+import { LatencySource } from '@/lib/api/types'
+import { adaptStatusToDashboard } from '@/features/network/api/status-adapter'
+import { buildDashboardMeshNodes } from '@/features/network/lib/dashboard-mesh-nodes'
+import type { StatusPayload } from '@/lib/api/types'
+
+const PUBLIC_STATUS_PAYLOAD: StatusPayload = {
+  node_id: '16ce0bb4de',
+  node_state: 'serving',
+  model_name: 'Hermes-2-Pro-Mistral-7B-Q4_K_M',
+  release_attestation: { status: 'valid', verified: true, signer_key_id: 'ed25519:self-signer' },
+  first_joined_mesh_ts: 1_700_000_000_000,
+  peers: [
+    {
+      id: 'aeac0d8e53',
+      owner: { status: 'unsigned', verified: false },
+      release_attestation: { status: 'missing', verified: false },
+      role: 'Client',
+      state: 'client',
+      models: [],
+      vram_gb: 0,
+      serving_models: [],
+      hosted_models: [],
+      version: '0.68.0',
+      rtt_ms: 7,
+      hostname: '1266a345aeb9',
+      first_joined_mesh_ts: 1_700_000_600_000
+    }
+  ],
+  models: [],
+  my_vram_gb: 12.5,
+  gpus: [],
+  serving_models: [{ name: 'Hermes-2-Pro-Mistral-7B-Q4_K_M', node_id: '16ce0bb4de', status: 'warm' }],
+  my_hostname: 'public-host',
+  version: '0.68.0'
+}
+
+describe('adaptStatusToDashboard', () => {
+  it('renders the public mesh welcome and connect command when publication_state is public', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      publication_state: 'public',
+      nostr_discovery: false
+    })
+
+    expect(dashboard.hero).toEqual(
+      expect.objectContaining({
+        title: 'Welcome to the public mesh',
+        description: expect.stringContaining('shared community capacity')
+      })
+    )
+    expect(dashboard.connect).toEqual(
+      expect.objectContaining({
+        runCommand: 'mesh-llm --auto',
+        description: 'join the public mesh'
+      })
+    )
+  })
+
+  it('treats auto-discovery clients as public even before publication_state reports public', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      publication_state: 'private',
+      nostr_discovery: true
+    })
+
+    expect(dashboard.hero.title).toBe('Welcome to the public mesh')
+    expect(dashboard.connect.runCommand).toBe('mesh-llm --auto')
+  })
+
+  it('keeps publish failures private even when nostr_discovery is enabled', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      publication_state: 'publish_failed',
+      nostr_discovery: true
+    })
+
+    expect(dashboard.hero.title).toBe('Your private mesh')
+    expect(dashboard.connect.runCommand).toBe('mesh-llm --auto --join <mesh-invite-token>')
+  })
+
+  it('falls back to nostr_discovery when publication_state is absent', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      nostr_discovery: true
+    })
+
+    expect(dashboard.hero.title).toBe('Welcome to the public mesh')
+    expect(dashboard.connect.runCommand).toBe('mesh-llm --auto')
+  })
+
+  it('accepts public status peers without node_id', () => {
+    const dashboard = adaptStatusToDashboard(PUBLIC_STATUS_PAYLOAD)
+
+    expect(dashboard.peers).toEqual([
+      expect.objectContaining({
+        id: '16ce0bb4de',
+        hostname: 'public-host',
+        shortId: '16ce0bb4',
+        role: 'you',
+        firstJoinedMeshTs: 1_700_000_000_000
+      }),
+      expect.objectContaining({
+        id: 'aeac0d8e53',
+        hostname: '1266a345aeb9',
+        shortId: 'aeac0d8e',
+        status: 'online',
+        role: 'client',
+        nodeState: 'client',
+        latencyMs: 7,
+        vramGB: 0,
+        owner: 'unsigned',
+        firstJoinedMeshTs: 1_700_000_600_000
+      })
+    ])
+    expect(dashboard.meshNodeSeeds[0]).toEqual(
+      expect.objectContaining({ id: '16ce0bb4de', firstJoinedMeshTs: 1_700_000_000_000 })
+    )
+  })
+
+  it('accepts additive release attestation fields for self and peers', () => {
+    const dashboard = adaptStatusToDashboard(PUBLIC_STATUS_PAYLOAD)
+
+    expect(dashboard.peers[0]).toEqual(expect.objectContaining({ id: '16ce0bb4de', role: 'you' }))
+    expect(dashboard.peers[1]).toEqual(expect.objectContaining({ id: 'aeac0d8e53', owner: 'unsigned' }))
+  })
+
+  it('adapts live status into the six-cell dashboard metrics bar', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      inflight_requests: 3,
+      gpus: [{ idx: 0, name: 'local-gpu', total_vram_gb: 12.5, used_vram_gb: 5 }],
+      peers: [
+        {
+          id: 'remote-serving',
+          role: 'Host',
+          state: 'serving',
+          serving_models: ['Remote-Model-Q4_K_M'],
+          hosted_models: [],
+          models: [],
+          vram_gb: 20,
+          gpus: [{ idx: 0, name: 'remote-gpu', total_vram_gb: 20, used_vram_gb: 4 }],
+          hostname: 'remote-serving'
+        }
+      ]
+    })
+
+    expect(dashboard.statusMetrics.map((metric) => metric.id)).toEqual([
+      'node-id',
+      'owner',
+      'nodes',
+      'active-models',
+      'mesh-vram',
+      'inflight',
+      'serving-strategy'
+    ])
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).toEqual(
+      expect.objectContaining({ value: '32.5', unit: 'GB' })
+    )
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).not.toHaveProperty('meta')
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'inflight')).toEqual(
+      expect.objectContaining({ value: 3 })
+    )
+    // No strategy named is itself the answer: an absent tile would read as a
+    // missing feature rather than a node on built-in defaults.
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'serving-strategy')).toEqual(
+      expect.objectContaining({ value: 'none', meta: 'running built-in defaults' })
+    )
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'inflight')).not.toHaveProperty('meta')
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'active-models')).toEqual(
+      expect.objectContaining({ value: 2, meta: '1 loaded locally · 1 remote' })
+    )
+  })
+
+  it('uses advertised capacity for mesh VRAM so the headline matches /api/status and doctor split', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 115.448725504,
+      gpus: [
+        {
+          idx: 0,
+          name: 'Apple M4 Max',
+          rated_vram_gb: 128,
+          vram_bytes: 115_448_725_504,
+          allocatable_vram_bytes: 115_448_725_504
+        }
+      ],
+      peers: [
+        {
+          id: 'remote-serving',
+          role: 'Host',
+          state: 'serving',
+          models: [],
+          vram_gb: 44.02970624,
+          gpus: [
+            {
+              idx: 0,
+              name: 'NVIDIA GeForce RTX 5090',
+              rated_vram_gb: 32,
+              vram_bytes: 34_190_917_632,
+              reserved_bytes: 514_850_816,
+              allocatable_vram_bytes: 33_676_066_816
+            },
+            {
+              idx: 1,
+              name: 'NVIDIA GeForce RTX 3080',
+              rated_vram_gb: 10,
+              vram_bytes: 10_737_418_240,
+              reserved_bytes: 383_778_816,
+              allocatable_vram_bytes: 10_353_639_424
+            }
+          ],
+          hostname: 'remote-serving'
+        }
+      ]
+    })
+
+    // 115.4 + 44.0 advertised, not the 128 + 32 + 10 = 170 rated sum.
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).toEqual(
+      expect.objectContaining({ value: '159.5', unit: 'GB' })
+    )
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).not.toHaveProperty('meta')
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(
+      expect.objectContaining({ vramGB: 115.448725504 })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'remote-serving')).toEqual(
+      expect.objectContaining({ vramGB: 44.02970624 })
+    )
+    expect(dashboard.peerSummary.capacity).toBe('159 GB')
+  })
+
+  it('excludes client-role nodes from Mesh Capacity even when they advertise VRAM', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 115.4,
+      peers: [
+        { id: 'host-peer', role: 'Host', state: 'serving', models: [], vram_gb: 44, hostname: 'host-peer' },
+        { id: 'client-peer', role: 'Client', state: 'client', models: [], vram_gb: 24, hostname: 'client-peer' },
+        {
+          id: 'client-by-node-state',
+          role: 'Worker',
+          node_state: 'client',
+          models: [],
+          vram_gb: 16,
+          hostname: 'client-by-node-state'
+        }
+      ]
+    })
+
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).toEqual(
+      expect.objectContaining({ value: '159.4', unit: 'GB' })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'client-peer')).toEqual(expect.objectContaining({ vramGB: 0 }))
+    expect(dashboard.peers.find((peer) => peer.id === 'client-by-node-state')).toEqual(
+      expect.objectContaining({ vramGB: 0 })
+    )
+    expect(dashboard.peerSummary.capacity).toBe('159 GB')
+  })
+
+  it('suppresses local capacity in Mesh Capacity when this node is a client', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      node_state: 'client',
+      my_vram_gb: 115.4,
+      peers: [{ id: 'host-peer', role: 'Host', state: 'serving', models: [], vram_gb: 44, hostname: 'host-peer' }]
+    })
+
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).toEqual(
+      expect.objectContaining({ value: '44.0', unit: 'GB' })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(expect.objectContaining({ vramGB: 0 }))
+  })
+
+  it('falls back to allocatable GPU inventory, then rated class, when a node advertises no capacity', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 0,
+      gpus: [
+        { idx: 0, name: 'local-gpu', rated_vram_gb: 32, vram_bytes: 32_000_000_000, reserved_bytes: 1_000_000_000 }
+      ],
+      peers: [
+        {
+          id: 'legacy-peer',
+          role: 'Host',
+          state: 'serving',
+          models: [],
+          vram_gb: 0,
+          gpus: [{ idx: 0, name: 'legacy-gpu', rated_vram_gb: 24 }],
+          hostname: 'legacy-peer'
+        }
+      ]
+    })
+
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(expect.objectContaining({ vramGB: 31 }))
+    expect(dashboard.peers.find((peer) => peer.id === 'legacy-peer')).toEqual(expect.objectContaining({ vramGB: 24 }))
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'mesh-vram')).toEqual(
+      expect.objectContaining({ value: '55.0', unit: 'GB' })
+    )
+  })
+
+  it('keeps live client and standby nodes connected instead of offline', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      node_state: 'standby',
+      serving_models: ['Local-String-Model-Q4_K_M'],
+      peers: [
+        {
+          id: 'idle-worker',
+          role: 'Worker',
+          state: 'standby',
+          models: [],
+          serving_models: [],
+          hosted_models: [],
+          vram_gb: 0,
+          hostname: 'idle-worker'
+        },
+        {
+          id: 'api-client',
+          role: 'Client',
+          state: 'client',
+          models: [],
+          serving_models: [],
+          hosted_models: [],
+          vram_gb: 0,
+          hostname: 'api-client'
+        }
+      ]
+    })
+
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(
+      expect.objectContaining({ status: 'online', nodeState: 'standby', hostedModels: ['Local-String-Model-Q4_K_M'] })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'idle-worker')).toEqual(
+      expect.objectContaining({ status: 'online', nodeState: 'standby' })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'api-client')).toEqual(
+      expect.objectContaining({ status: 'online', nodeState: 'client' })
+    )
+    expect(dashboard.peerSummary.online).toBe(3)
+    expect(dashboard.meshNodeSeeds[0]).toEqual(
+      expect.objectContaining({ status: 'online', meshState: 'standby', servingModels: ['Local-String-Model-Q4_K_M'] })
+    )
+  })
+
+  it('defaults the in-flight request count to zero when the backend field is absent', () => {
+    const dashboard = adaptStatusToDashboard(PUBLIC_STATUS_PAYLOAD)
+
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'inflight')).toEqual(
+      expect.objectContaining({ value: 0 })
+    )
+    expect(dashboard.statusMetrics.find((metric) => metric.id === 'inflight')).not.toHaveProperty('meta')
+  })
+
+  it('only seeds the self mesh node so live peers use clustered placement', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      peers: [
+        {
+          id: 'peer-a',
+          role: 'Host',
+          state: 'serving',
+          models: ['Hermes-2-Pro-Mistral-7B-Q4_K_M'],
+          serving_models: ['Hermes-2-Pro-Mistral-7B-Q4_K_M'],
+          hosted_models: ['Hermes-2-Pro-Mistral-7B-Q4_K_M'],
+          vram_gb: 24,
+          hostname: 'worker-a',
+          first_joined_mesh_ts: 1_700_001_000_000
+        },
+        {
+          id: 'peer-b',
+          role: 'Worker',
+          state: 'serving',
+          models: ['Qwen3.5-4B-UD'],
+          serving_models: ['Qwen3.5-4B-UD'],
+          hosted_models: ['Qwen3.5-4B-UD'],
+          vram_gb: 16,
+          hostname: 'worker-b'
+        },
+        {
+          id: 'peer-c',
+          role: 'Client',
+          state: 'client',
+          models: [],
+          serving_models: [],
+          hosted_models: [],
+          vram_gb: 0,
+          hostname: 'client-c'
+        }
+      ]
+    })
+
+    expect(dashboard.meshNodeSeeds).toEqual([
+      expect.objectContaining({
+        id: '16ce0bb4de',
+        role: 'self',
+        x: 50,
+        y: 50
+      })
+    ])
+
+    const meshNodes = buildDashboardMeshNodes(dashboard.peers, dashboard.meshId, dashboard.meshNodeSeeds)
+    const selfNode = meshNodes.find((node) => node.role === 'self')
+    const remoteNodes = meshNodes.filter((node) => node.role !== 'self')
+
+    expect(selfNode).toEqual(expect.objectContaining({ id: '16ce0bb4de', x: 50, y: 50 }))
+    expect(remoteNodes).toHaveLength(3)
+    expect(remoteNodes.map((node) => node.peerId)).toEqual(['peer-a', 'peer-b', 'peer-c'])
+    expect(dashboard.peers.find((peer) => peer.id === 'peer-a')).toEqual(
+      expect.objectContaining({ firstJoinedMeshTs: 1_700_001_000_000 })
+    )
+    expect(remoteNodes.find((node) => node.peerId === 'peer-a')).toEqual(
+      expect.objectContaining({
+        host: true,
+        renderKind: 'serving',
+        meshState: 'serving',
+        firstJoinedMeshTs: 1_700_001_000_000
+      })
+    )
+    expect(remoteNodes.find((node) => node.peerId === 'peer-b')).toEqual(
+      expect.objectContaining({ client: false, host: false, renderKind: 'serving', meshState: 'serving' })
+    )
+    expect(remoteNodes.find((node) => node.peerId === 'peer-c')).toEqual(
+      expect.objectContaining({ client: true, host: false, renderKind: 'client', meshState: 'client' })
+    )
+    for (const node of remoteNodes) {
+      expect(node.x).toBeGreaterThanOrEqual(0)
+      expect(node.x).toBeLessThanOrEqual(100)
+      expect(node.y).toBeGreaterThanOrEqual(0)
+      expect(node.y).toBeLessThanOrEqual(100)
+    }
+  })
+
+  it('keeps idle live workers distinct from live clients', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      peers: [
+        {
+          id: 'idle-worker',
+          role: 'Worker',
+          state: 'standby',
+          models: [],
+          serving_models: [],
+          hosted_models: [],
+          vram_gb: 0,
+          hostname: 'idle-worker'
+        },
+        {
+          id: 'api-client',
+          role: 'Client',
+          state: 'client',
+          models: [],
+          serving_models: [],
+          hosted_models: [],
+          vram_gb: 0,
+          hostname: 'api-client'
+        }
+      ]
+    })
+
+    const meshNodes = buildDashboardMeshNodes(dashboard.peers, dashboard.meshId, dashboard.meshNodeSeeds)
+
+    expect(dashboard.peers.find((peer) => peer.id === 'idle-worker')).toEqual(
+      expect.objectContaining({ role: 'worker', status: 'online', nodeState: 'standby' })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'api-client')).toEqual(
+      expect.objectContaining({ role: 'client', status: 'online', nodeState: 'client' })
+    )
+    expect(meshNodes.find((node) => node.peerId === 'idle-worker')).toEqual(
+      expect.objectContaining({ client: false, renderKind: 'worker', meshState: 'standby' })
+    )
+    expect(meshNodes.find((node) => node.peerId === 'api-client')).toEqual(
+      expect.objectContaining({ client: true, renderKind: 'client', meshState: 'client' })
+    )
+  })
+
+  it('normalizes live hosted model fallbacks and infers share from VRAM when missing', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 10,
+      serving_models: [],
+      model_name: 'Self-Model-Q4_K_M',
+      peers: [
+        {
+          id: 'hosted-fallback',
+          role: 'Host',
+          state: 'serving',
+          serving_models: [],
+          hosted_models: ['Hosted-Model-Q4_K_M'],
+          models: ['Ignored-Model-Q4_K_M'],
+          vram_gb: 20,
+          hostname: 'hosted-fallback'
+        },
+        {
+          id: 'models-fallback',
+          role: 'Worker',
+          state: 'serving',
+          serving_models: [],
+          hosted_models: [],
+          models: ['Models-Only-Q4_K_M'],
+          vram_gb: 0,
+          hostname: 'models-fallback'
+        }
+      ]
+    })
+
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(
+      expect.objectContaining({ hostedModels: ['Self-Model-Q4_K_M'], sharePct: 33 })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'hosted-fallback')).toEqual(
+      expect.objectContaining({ hostedModels: ['Hosted-Model-Q4_K_M'], sharePct: 67 })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'models-fallback')).toEqual(
+      expect.objectContaining({ hostedModels: ['Models-Only-Q4_K_M'], sharePct: 0 })
+    )
+  })
+
+  it('does not infer mesh share for non-serving peers without hosted models', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 10,
+      peers: [
+        {
+          id: 'serving-worker',
+          role: 'Worker',
+          state: 'serving',
+          serving_models: ['Serving-Model-Q4_K_M'],
+          hosted_models: [],
+          models: [],
+          vram_gb: 20,
+          hostname: 'serving-worker'
+        },
+        {
+          id: 'standby-worker',
+          role: 'Worker',
+          state: 'standby',
+          serving_models: [],
+          hosted_models: [],
+          models: [],
+          vram_gb: 30,
+          hostname: 'standby-worker'
+        },
+        {
+          id: 'api-client',
+          role: 'Client',
+          state: 'client',
+          serving_models: [],
+          hosted_models: [],
+          models: [],
+          vram_gb: 40,
+          hostname: 'api-client'
+        }
+      ]
+    })
+
+    expect(dashboard.peers.find((peer) => peer.id === '16ce0bb4de')).toEqual(expect.objectContaining({ sharePct: 33 }))
+    expect(dashboard.peers.find((peer) => peer.id === 'serving-worker')).toEqual(
+      expect.objectContaining({ sharePct: 67 })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'standby-worker')).toEqual(
+      expect.objectContaining({ sharePct: 0 })
+    )
+    expect(dashboard.peers.find((peer) => peer.id === 'api-client')).toEqual(expect.objectContaining({ sharePct: 0 }))
+  })
+
+  it('maps snake_case latency fields from API to camelCase Peer properties', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      peers: [
+        {
+          id: 'latency-peer',
+          role: 'Host',
+          state: 'serving',
+          models: ['Test-Model'],
+          vram_gb: 16,
+          hostname: 'latency-host',
+          latency_ms: 7.2,
+          latency_source: LatencySource.DIRECT,
+          latency_age_ms: 500,
+          latency_observer_id: 'observer-node-id'
+        }
+      ]
+    })
+
+    const peer = dashboard.peers.find((p) => p.id === 'latency-peer')
+    expect(peer).toBeDefined()
+    expect(peer!.latencyMs).toBe(7.2)
+    expect(peer!.latencySource).toBe(LatencySource.DIRECT)
+    expect(peer!.latencyAgeMs).toBe(500)
+    expect(peer!.latencyObserverId).toBe('observer-node-id')
+  })
+
+  it('defaults self peer latency fields to null', () => {
+    const dashboard = adaptStatusToDashboard(PUBLIC_STATUS_PAYLOAD)
+
+    const selfPeer = dashboard.peers.find((p) => p.id === '16ce0bb4de')
+    expect(selfPeer).toBeDefined()
+    expect(selfPeer!.latencyMs).toBe(0)
+    expect(selfPeer!.latencySource).toBeNull()
+    expect(selfPeer!.latencyAgeMs).toBeNull()
+    expect(selfPeer!.latencyObserverId).toBeNull()
+  })
+
+  it('falls back to rtt_ms when latency_ms is absent', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      peers: [
+        {
+          id: 'rtt-peer',
+          role: 'Client',
+          state: 'client',
+          models: [],
+          vram_gb: 0,
+          hostname: 'rtt-host',
+          rtt_ms: 12.5
+        }
+      ]
+    })
+
+    const peer = dashboard.peers.find((p) => p.id === 'rtt-peer')
+    expect(peer).toBeDefined()
+    expect(peer!.latencyMs).toBe(12.5)
+  })
+})
+
+describe('advertised memory in the dashboard adapter', () => {
+  const memory = {
+    total_bytes: 12_000_000_000,
+    reserved_bytes: 500_000_000,
+    platform_reserve_bytes: 0,
+    configured_reserve_bytes: 2_000_000_000,
+    usable_bytes: 9_500_000_000,
+    system_ram_bytes: 32_000_000_000,
+    ram_offload_bytes: 18_000_000_000
+  }
+
+  it('carries the breakdown each node advertises into the node model without touching totals', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      my_vram_gb: 9.5,
+      my_memory: memory,
+      peers: [
+        {
+          ...PUBLIC_STATUS_PAYLOAD.peers[0],
+          role: 'Worker',
+          state: 'serving',
+          vram_gb: 37,
+          memory: {
+            ...memory,
+            total_bytes: 40_000_000_000,
+            reserved_bytes: 1_000_000_000,
+            usable_bytes: 37_000_000_000
+          }
+        }
+      ]
+    })
+
+    const [self, worker] = dashboard.peers
+    expect(self.memory).toEqual({
+      totalGB: 12,
+      reservedGB: 0.5,
+      platformReserveGB: 0,
+      configuredReserveGB: 2,
+      usableGB: 9.5,
+      systemRamGB: 32,
+      ramOffloadGB: 18
+    })
+    expect(self.vramGB).toBe(9.5)
+    expect(worker.memory?.totalGB).toBe(40)
+    expect(worker.memory?.usableGB).toBe(37)
+    expect(worker.vramGB).toBe(37)
+  })
+
+  it('leaves the breakdown absent for nodes that did not advertise one', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      peers: [{ ...PUBLIC_STATUS_PAYLOAD.peers[0], role: 'Worker', state: 'serving', vram_gb: 39 }]
+    })
+
+    const [self, worker] = dashboard.peers
+    expect(self.memory).toBeUndefined()
+    expect(worker.memory).toBeUndefined()
+  })
+
+  it('shows the resolved strategy and how much it composed', () => {
+    const dashboard = adaptStatusToDashboard({
+      ...PUBLIC_STATUS_PAYLOAD,
+      runtime: {
+        serving_strategy: {
+          strategy: 'throughput',
+          applied: [
+            { axis: 'defaults.throughput.last_stage_decode_batch', value: 'true', because: 'why' },
+            { axis: 'defaults.throughput.pipeline_decode_groups', value: '2', because: 'why' }
+          ],
+          declined: [{ axis: 'defaults.speculative.strategy', because: 'you set it explicitly' }]
+        }
+      }
+    })
+
+    const metric = dashboard.statusMetrics.find((m) => m.id === 'serving-strategy')
+    expect(metric).toEqual(
+      expect.objectContaining({
+        value: 'throughput',
+        // The deferred axis is surfaced here too: somebody who set a flag by
+        // hand should see that it won without opening doctor split.
+        meta: '2 composed · 1 left to your settings',
+        badge: { label: 'composed', tone: 'accent' }
+      })
+    )
+  })
+})

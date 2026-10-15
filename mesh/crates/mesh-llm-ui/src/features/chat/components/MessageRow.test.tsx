@@ -1,0 +1,613 @@
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { MessageRow } from '@/features/chat/components/MessageRow'
+
+describe('MessageRow', () => {
+  it('renders non-inspectable messages as static articles with row visuals', () => {
+    const { container } = render(
+      <MessageRow
+        messageRole="assistant"
+        body="Static response from the mesh"
+        timestamp="12:09"
+        model="llama-local-q4"
+        route="carrack.mesh"
+        tokens="256 tokens"
+      />
+    )
+
+    const article = container.querySelector('article')
+
+    expect(article).toBeInTheDocument()
+    expect(article).toHaveClass('relative', '-mx-2', 'mb-5', 'block', 'w-[calc(100%+16px)]', 'select-none')
+    expect(article).not.toHaveClass('focus-visible:outline-accent')
+    expect(article).toHaveTextContent('Static response from the mesh')
+    expect(screen.queryByRole('button', { name: /inspect/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /static response from the mesh/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps assistant model in the header and renders the complete response stats bar', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="Response metadata should read like an operations ledger"
+        timestamp="2026-05-06 14:52:31 UTC"
+        model="llama-local-q4"
+        tokens="27 tok"
+        tokPerSec="15.3 tok/s"
+        ttft="1116ms"
+      />
+    )
+
+    const header = screen.getByText('Assistant').parentElement
+    const stats = screen.getByText('27').closest('.select-none')
+
+    expect(header).toHaveTextContent('Assistant')
+    expect(header).toHaveTextContent('llama-local-q4')
+    expect(header).not.toHaveTextContent('14:52')
+    expect(stats).toHaveTextContent('27 tok')
+    expect(stats).toHaveTextContent('15.3 tok/s')
+    expect(stats).toHaveTextContent('TTFT 1116ms')
+  })
+
+  it('shows the submitted model in user headers without rendering timestamps or response stats', () => {
+    render(
+      <MessageRow
+        messageRole="user"
+        body="Route this prompt through the local node"
+        timestamp="2026-05-06T20:17:00.212Z"
+        model="GLM-4.7-Flash-Q4_K_M"
+      />
+    )
+
+    const header = screen.getByText('You').parentElement
+
+    expect(header).toHaveTextContent('GLM-4.7-Flash-Q4_K_M')
+    expect(header).not.toHaveTextContent('2026-05-06T20:17:00.212Z')
+    expect(screen.queryByText('0.0 tok/s')).not.toBeInTheDocument()
+  })
+
+  it('renders inspectable messages as articles with an explicit inspect control', async () => {
+    const user = userEvent.setup()
+    const inspect = vi.fn()
+
+    const { container } = render(
+      <MessageRow
+        messageRole="assistant"
+        body="Inspectable response from the mesh"
+        timestamp="12:10"
+        inspect={inspect}
+        inspectLabel="Inspect mesh route"
+      />
+    )
+
+    const article = container.querySelector('article')
+    const button = screen.getByRole('button', { name: 'Inspect mesh route' })
+
+    expect(article).toHaveClass('relative', '-mx-2', 'mb-5', 'block', 'w-[calc(100%+16px)]', 'select-none')
+    expect(button).not.toHaveClass('w-[calc(100%+16px)]')
+    expect(article).toHaveTextContent('Inspectable response from the mesh')
+
+    await user.click(button)
+
+    expect(inspect).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps inspectable rows accessible when no explicit inspect label is provided', () => {
+    render(
+      <MessageRow
+        messageRole="user"
+        body="Route this prompt through the local node"
+        timestamp="12:11"
+        inspect={() => {}}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Inspect user message from 12:11' })).toBeInTheDocument()
+  })
+
+  it('renders submitted attachment actions beside user messages without nesting row inspection', async () => {
+    const user = userEvent.setup()
+    const inspect = vi.fn()
+    const openAttachment = vi.fn()
+    const { container } = render(
+      <MessageRow
+        messageRole="user"
+        body="Describe this image to me"
+        timestamp="12:11"
+        inspect={inspect}
+        inspectLabel="Inspect submitted image prompt"
+        attachments={[
+          {
+            id: 'image-1',
+            label: 'Image 1',
+            kind: 'image',
+            fileName: 'cat.png',
+            onOpen: openAttachment
+          }
+        ]}
+      />
+    )
+
+    expect(container.querySelector('article')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Inspect submitted image prompt' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Open cat.png' }))
+
+    expect(openAttachment).toHaveBeenCalledTimes(1)
+    expect(inspect).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Inspect submitted image prompt' }))
+
+    expect(inspect).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders user messages on a subtly dimmed surface', () => {
+    render(<MessageRow messageRole="user" body="Route this prompt through the local node" timestamp="12:11" />)
+
+    const userSurface = screen
+      .getByText('Route this prompt through the local node')
+      .closest('[style*="chat-user-message-background"]')
+
+    expect(userSurface).toHaveAttribute(
+      'style',
+      expect.stringContaining('background: var(--chat-user-message-background)')
+    )
+    expect(userSurface).toHaveAttribute('style', expect.stringContaining('border-left: 1px solid var(--color-accent)'))
+    expect(userSurface).not.toHaveAttribute('style', expect.stringContaining('border-radius'))
+  })
+
+  it('marks queued user messages with a queued label and muted leading rule', () => {
+    render(<MessageRow messageRole="user" body="Queued follow-up" timestamp="12:11" state="queued" />)
+
+    const queuedSurface = screen.getByText('Queued follow-up').closest('[style*="border-left"]')
+
+    expect(screen.getByText('Queued')).toBeInTheDocument()
+    expect(queuedSurface).toHaveAttribute(
+      'style',
+      expect.stringContaining(
+        'border-left: 1px solid color-mix(in oklab, var(--color-fg-faint) 42%, var(--color-border))'
+      )
+    )
+  })
+
+  it('centers a queued-message remove control vertically in the full user message container', async () => {
+    const user = userEvent.setup()
+    const removeQueued = vi.fn()
+
+    render(
+      <MessageRow
+        messageRole="user"
+        body="Queued follow-up"
+        timestamp="12:11"
+        state="queued"
+        onRemoveQueued={removeQueued}
+      />
+    )
+
+    const removeButton = screen.getByRole('button', { name: 'Remove queued message' })
+    const queuedSurface = removeButton.closest('[style*="chat-user-message-background"]')
+
+    expect(queuedSurface).toHaveClass('relative')
+    expect(removeButton).toHaveClass('absolute', 'right-3', 'top-1/2', '-translate-y-1/2')
+    expect(removeButton).not.toHaveClass('left-1/2', '-translate-x-1/2')
+
+    await user.click(removeButton)
+
+    expect(removeQueued).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a spinner row while an assistant response is waiting for first text', () => {
+    render(<MessageRow messageRole="assistant" body="" timestamp="12:11" model="Qwen3-8B" state="streaming" />)
+
+    expect(screen.getByText('Assistant').parentElement).toHaveTextContent('Qwen3-8B')
+    expect(screen.getByText('Streaming response...')).toBeInTheDocument()
+  })
+
+  it('places the streaming control on its own row below streamed text', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="Partial streamed response text"
+        timestamp="12:11"
+        model="Qwen3-8B"
+        state="streaming"
+      />
+    )
+
+    const streamingControlRow = screen.getByRole('button', { name: 'Stop streaming' }).parentElement
+
+    expect(streamingControlRow).toHaveClass('mt-3', 'block')
+  })
+
+  it('separates closed thinking from final assistant response text', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="<think>Check geography facts before answering.</think> The capital of France is Paris."
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    expect(screen.getByText('Thinking').closest('[data-thinking-state="complete"]')).toHaveTextContent('Thinking')
+    expect(screen.getByText('Check geography facts before answering.').closest('.select-text')).toBeInTheDocument()
+    expect(screen.getByText('The capital of France is Paris.').closest('.select-text')).toBeInTheDocument()
+  })
+
+  it('treats leading streamed text before a closing think tag as model thinking', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="The user asked a simple factual question.</think> The capital of France is Paris."
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    expect(screen.getByText('Thinking').closest('[data-thinking-state="complete"]')).toHaveTextContent(
+      'The user asked a simple factual question.'
+    )
+    expect(screen.getByText('The capital of France is Paris.')).toBeInTheDocument()
+  })
+
+  it('moves Gemma channel thinking into the trace before rendering the final response', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="<|channel|>thoughtCheck whether the prompt is a test.<channel|>Test received!"
+        timestamp="12:11"
+        model="unsloth/gemma-4-31B-it-GGUF:UD-Q8_K_XL"
+      />
+    )
+
+    expect(screen.getByText('Thinking').closest('[data-thinking-state="complete"]')).toHaveTextContent(
+      'Check whether the prompt is a test.'
+    )
+    expect(screen.getByText('Test received!').closest('.select-text')).toBeInTheDocument()
+    expect(screen.queryByText(/<\|channel\|>thought/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/<channel\|>/)).not.toBeInTheDocument()
+  })
+
+  it('formats final assistant response text as markdown', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'<think>Check geography facts.</think> The capital of France is **Paris**.\n\n- *Verified*\n- `Concise`'}
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    expect(screen.getByText('Paris').tagName.toLowerCase()).toBe('strong')
+    expect(screen.getByText('Verified').tagName.toLowerCase()).toBe('em')
+    expect(screen.getByText('Concise').tagName.toLowerCase()).toBe('code')
+    expect(screen.getByText('Paris').closest('.select-text')).toBeInTheDocument()
+  })
+
+  it('formats thinking text as markdown', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'<think>1. **Analyze input**\n   - Check the `route`\n   - Keep it *brief*</think> Final response.'}
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    const thinkingTrace = screen.getByText('Thinking').closest('[data-thinking-state="complete"]')
+
+    expect(thinkingTrace).toBeInstanceOf(HTMLElement)
+    const thinkingTraceElement = thinkingTrace as HTMLElement
+
+    expect(screen.queryByText(/\*\*Analyze input\*\*/)).not.toBeInTheDocument()
+    expect(within(thinkingTraceElement).getByText('Analyze input').tagName.toLowerCase()).toBe('strong')
+    expect(within(thinkingTraceElement).getByText('route').tagName.toLowerCase()).toBe('code')
+    expect(within(thinkingTraceElement).getByText('brief').tagName.toLowerCase()).toBe('em')
+    expect(thinkingTraceElement.querySelector('ol')).toHaveClass('list-decimal')
+    expect(thinkingTraceElement.querySelector('ul')).toHaveClass('list-disc')
+    expect(screen.getByText('Final response.')).toBeInTheDocument()
+  })
+
+  it('renders assistant markdown tables with semantic compact cell styling', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'| Category | Texture |\n| --- | --- |\n| Fresh | Soft |\n| Aged | Firm |'}
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    expect(screen.queryByText(/\| Category \| Texture \|/)).not.toBeInTheDocument()
+    expect(screen.getByRole('table')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Category' })).toHaveClass('font-semibold')
+    expect(screen.getByRole('cell', { name: 'Fresh' })).toHaveClass('border', 'text-fg-dim')
+  })
+
+  it('keeps markdown tables semantic when assistant messages can be inspected', async () => {
+    const user = userEvent.setup()
+    const inspect = vi.fn()
+
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'| Node | Role |\n| --- | --- |\n| carrack | primary |'}
+        timestamp="12:11"
+        inspect={inspect}
+        inspectLabel="Inspect routed response"
+      />
+    )
+
+    const table = screen.getByRole('table')
+
+    expect(within(table).getByRole('columnheader', { name: 'Node' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'carrack' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Inspect routed response' }))
+
+    expect(inspect).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not preserve raw markdown blank lines around rendered assistant blocks', () => {
+    const { container } = render(
+      <MessageRow
+        messageRole="assistant"
+        body={'Intro paragraph.\n\n## Details\n\n- First item\n\n- Second item'}
+        timestamp="12:11"
+        model="Qwen3-8B"
+      />
+    )
+
+    expect(container.querySelector('.whitespace-pre-wrap')).not.toBeInTheDocument()
+    expect(screen.getByText('First item').parentElement).toHaveClass('marker:text-fg-faint', '[&>p]:my-0')
+  })
+
+  it('marks an open thinking segment as in progress while streaming', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="<think>Checking the current capital from memory"
+        timestamp="12:11"
+        model="Qwen3-8B"
+        state="streaming"
+      />
+    )
+
+    expect(screen.getByText('Thinking').closest('[data-thinking-state="active"]')).toHaveTextContent('Thinking')
+    expect(screen.getByText('Checking the current capital from memory').closest('.select-text')).toBeInTheDocument()
+    expect(screen.getByText('Streaming response...')).toBeInTheDocument()
+  })
+
+  it('keeps streamed reasoning without an opening tag inside the active thinking container', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="The user asked for a long story, so plan the structure first."
+        timestamp="12:11"
+        model="Qwen3-8B"
+        state="streaming"
+      />
+    )
+
+    const thinkingContainer = screen.getByText('Thinking').closest('[data-thinking-state="active"]')
+
+    expect(thinkingContainer).toHaveTextContent('The user asked for a long story, so plan the structure first.')
+    expect(
+      screen.getByText('The user asked for a long story, so plan the structure first.').closest('.select-text')
+    ).toBeInTheDocument()
+    expect(screen.getByText('Streaming response...')).toBeInTheDocument()
+  })
+
+  it('shows the active thinking container as soon as the think tag streams in', () => {
+    render(<MessageRow messageRole="assistant" body="<think>" timestamp="12:11" model="Qwen3-8B" state="streaming" />)
+
+    const thinkingContainer = screen.getByText('Thinking').closest('[data-thinking-state="active"]')
+
+    expect(thinkingContainer).toBeInTheDocument()
+    expect(thinkingContainer).toHaveTextContent('Thinking')
+    expect(screen.getByText('Streaming response...')).toBeInTheDocument()
+  })
+
+  it('keeps a noisy mesh consultation in one compact expandable row', async () => {
+    const user = userEvent.setup()
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={
+          '<think>Routing through mesh…\nQuerying peer models…\nWaiting on a slow peer…\nHold on, this is taking a moment…</think>'
+        }
+        timestamp="12:11"
+        model="mesh"
+        state="streaming"
+      />
+    )
+
+    const disclosure = screen.getByRole('button', {
+      name: 'Consulting peers and corroborating responses… Show details'
+    })
+    const rawTrace = screen.getByText(/Routing through mesh/)
+
+    expect(disclosure.closest('[data-thinking-state="active"]')).toBeInTheDocument()
+    expect(rawTrace).not.toBeVisible()
+    expect(screen.getByText('Streaming response...')).toBeVisible()
+
+    await user.click(disclosure)
+
+    const details = screen.getByRole('region', {
+      name: 'Consulting peers and corroborating responses… details'
+    })
+    expect(rawTrace).toBeVisible()
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    expect(details).toHaveAttribute('tabindex', '0')
+    details.focus()
+    expect(details).toHaveFocus()
+    expect(rawTrace).toHaveTextContent('Waiting on a slow peer…')
+    expect(rawTrace).toHaveTextContent('Hold on, this is taking a moment…')
+  })
+
+  it('keeps a fast mesh answer visible before any consultation progress arrives', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="Fast mesh answer is already streaming."
+        timestamp="12:11"
+        model="mesh"
+        state="streaming"
+      />
+    )
+
+    expect(screen.getByText('Fast mesh answer is already streaming.')).toBeVisible()
+    expect(screen.queryByText('Consulting peers and corroborating responses…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+  })
+
+  it('labels completed mesh work as a folded peer consultation', () => {
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body="<think>Routing through mesh…</think>Corroborated answer."
+        timestamp="12:11"
+        model="mesh"
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Peer consultation Show details' })).toBeVisible()
+    expect(screen.getByText('Routing through mesh…')).not.toBeVisible()
+    expect(screen.getByText('Corroborated answer.')).toBeVisible()
+  })
+
+  it('only opts the message body back into text selection', () => {
+    const { container } = render(
+      <MessageRow
+        messageRole="assistant"
+        body="Only this response text should be selectable"
+        timestamp="12:12"
+        model="llama-local-q4"
+        route="carrack.mesh"
+        tokens="256 tokens"
+      />
+    )
+
+    expect(container.querySelector('article')).toHaveClass('select-none')
+    expect(screen.getByText('Only this response text should be selectable').closest('.select-text')).toBeInTheDocument()
+    expect(screen.getByText('Assistant').parentElement).toHaveClass('select-none')
+    expect(screen.getByText('256').closest('.select-none')).toHaveClass('select-none')
+  })
+
+  it('does not draw a rectangular border around inspected assistant message bodies', () => {
+    render(<MessageRow messageRole="assistant" body="Selected assistant response" timestamp="12:12" inspected />)
+
+    expect(screen.getByText('Selected assistant response').closest('[style*="border"]')).toHaveAttribute(
+      'style',
+      expect.stringContaining('border: 1px solid transparent')
+    )
+  })
+
+  it('hides route metadata when disabled', () => {
+    render(
+      <>
+        <MessageRow
+          messageRole="user"
+          body="Route this prompt through the local node"
+          timestamp="12:13"
+          routeNode="carrack"
+          showRouteMetadata={false}
+        />
+        <MessageRow
+          messageRole="assistant"
+          body="Selected assistant response"
+          timestamp="12:14"
+          route="carrack"
+          routeNode="carrack"
+          showRouteMetadata={false}
+        />
+      </>
+    )
+
+    expect(screen.queryByText(/sent to/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/routed via/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('MessageRow copy button', () => {
+  function installClipboard(writeText: (text: string) => Promise<void>) {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText }
+    })
+  }
+
+  afterEach(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+  })
+
+  it('copies a user message body to the clipboard', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    installClipboard(writeText)
+
+    render(<MessageRow messageRole="user" body="Summarize this mesh status" timestamp="12:10" />)
+
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+
+    expect(writeText).toHaveBeenCalledWith('Summarize this mesh status')
+    expect(await screen.findByRole('button', { name: 'Copied message' })).toBeInTheDocument()
+  })
+
+  it('copies only the response segments of an assistant message, excluding thinking', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    installClipboard(writeText)
+
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'<think>reasoning about the nodes</think>The mesh has 3 nodes online.'}
+        timestamp="12:11"
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+
+    expect(writeText).toHaveBeenCalledWith('The mesh has 3 nodes online.')
+  })
+
+  it('preserves leading indentation when copying assistant code blocks', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    installClipboard(writeText)
+
+    render(
+      <MessageRow
+        messageRole="assistant"
+        body={'<think>reasoning</think>\n\n    first()\n    second()'}
+        timestamp="12:11"
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+
+    expect(writeText).toHaveBeenCalledWith('    first()\n    second()')
+  })
+
+  it('hides the copy button while the response is streaming', () => {
+    render(<MessageRow messageRole="assistant" body="Partial response" timestamp="12:12" state="streaming" />)
+
+    expect(screen.queryByRole('button', { name: /copy message/i })).not.toBeInTheDocument()
+  })
+
+  it('reports a failed clipboard write in the button label', async () => {
+    const user = userEvent.setup()
+    const writeText = vi
+      .fn<(text: string) => Promise<void>>()
+      .mockRejectedValue(new DOMException('Blocked', 'NotAllowedError'))
+    installClipboard(writeText)
+
+    render(<MessageRow messageRole="assistant" body="Response that cannot be copied" timestamp="12:13" />)
+
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+
+    expect(await screen.findByRole('button', { name: 'Copy message failed' })).toBeInTheDocument()
+  })
+})

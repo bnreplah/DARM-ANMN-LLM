@@ -1,0 +1,331 @@
+# Agents And Blackboard
+
+Repository QA automation follows `.agents/skills/manage-ci/SKILL.md`: add no
+new Python tooling; use typed `tools/xtask` commands behind thin Just recipes.
+From the repository root, `cargo xtool repo-consistency ci-crate-lists` is an
+existing example.
+
+Mesh LLM exposes an OpenAI-compatible API on `http://localhost:9337/v1`, so most agent tools can talk to it directly.
+
+`/v1/models` lists the models currently available on the mesh. Requests are routed by the `model` field.
+
+General rules for agent clients:
+
+- Use a base URL ending in `/v1` unless the client asks for the full chat-completions URL.
+- Pick an exact model id from `GET /v1/models`.
+- Prefer chat-completions mode unless the client explicitly documents Responses API support.
+- Use a tool-capable model for coding agents.
+
+## Built-in launcher integrations
+
+For built-in launcher commands such as `goose`, `claude`, `opencode`, and `pi`:
+
+- goose and claude reuse a local mesh on the chosen `--port`
+- opencode and pi target `--host` (default `127.0.0.1:9337`) and only auto-start a local client for loopback/localhost targets
+- if `--model` is omitted, the launcher picks the strongest tool-capable model available
+- when the harness exits, the auto-started node is cleaned up
+
+## Goose
+
+Goose can use either its built-in OpenAI provider or a custom provider JSON.
+Mesh LLM's launcher writes a custom provider so it can target the local mesh
+without hand-editing Goose config.
+
+Launch Goose:
+
+```bash
+mesh-llm goose
+```
+
+Use a specific model:
+
+```bash
+mesh-llm goose --model MiniMax-M2.5-Q4_K_M
+```
+
+This writes or updates `~/.config/goose/custom_providers/mesh.json` and launches Goose.
+
+Manual OpenAI-provider setup, if you do not want to use the launcher:
+
+```bash
+export GOOSE_PROVIDER="openai"
+export GOOSE_MODEL="<model-id-from-v1-models>"
+export OPENAI_HOST="http://127.0.0.1:9337"
+export OPENAI_API_KEY="mesh"
+```
+
+Goose custom providers live under `~/.config/goose/custom_providers/` on
+macOS/Linux.
+
+## Claude Code
+
+Launch Claude Code directly through Mesh LLM:
+
+```bash
+mesh-llm claude
+```
+
+Use a specific model:
+
+```bash
+mesh-llm claude --model MiniMax-M2.5-Q4_K_M
+```
+
+## OpenCode
+
+Launch OpenCode directly through Mesh LLM:
+
+```bash
+mesh-llm opencode
+```
+
+Point OpenCode at a different mesh host or URL:
+
+```bash
+mesh-llm opencode --host https://mesh.example.com
+```
+
+Use a specific model:
+
+```bash
+mesh-llm opencode --host 127.0.0.1:9337 --model MiniMax-M2.5-Q4_K_M
+```
+
+Write a merged persistent OpenCode config to `~/.config/opencode/opencode.json`:
+
+```bash
+mesh-llm opencode --write --host 127.0.0.1:9337
+```
+
+If only `~/.config/opencode/opencode.jsonc` exists, Mesh LLM stops with a clear error telling you to rename or migrate it to `opencode.json` first.
+
+Mesh LLM injects a temporary OpenCode config with `OPENCODE_CONFIG_CONTENT` when it launches OpenCode, so it does not edit your persistent OpenCode config files.
+
+OpenCode's provider docs use `@ai-sdk/openai-compatible` for providers that
+serve `/v1/chat/completions`, which is the package Mesh LLM injects. Use
+`/connect` and `/models` inside OpenCode if you want to inspect or switch the
+configured provider manually.
+
+If you want to rerun OpenCode manually, use the same config contract Mesh LLM generates:
+
+```bash
+OPENCODE_CONFIG_CONTENT='{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mesh": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "mesh-llm",
+      "options": {
+        "baseURL": "http://127.0.0.1:9337/v1"
+      },
+      "models": {
+        "MiniMax-M2.5-Q4_K_M": {
+          "name": "MiniMax-M2.5-Q4_K_M"
+        }
+      }
+    }
+  }
+}' OPENAI_API_KEY=dummy opencode -m mesh/MiniMax-M2.5-Q4_K_M
+```
+
+## Pi Coding Agent
+
+Here, “Pi” means the Pi Coding Agent, not Raspberry Pi hardware. Launch Pi
+directly through Mesh LLM:
+
+```bash
+mesh-llm pi
+```
+
+Use a specific model:
+
+```bash
+mesh-llm pi --model MiniMax-M2.5-Q4_K_M
+```
+
+This writes every model from the mesh into `~/.pi/agent/models.json` and launches Pi.
+To update the Pi config without launching pi, run:
+
+```bash
+mesh-llm pi --write
+```
+
+Use `--host` to target a remote mesh host or URL, including a custom port:
+
+```bash
+mesh-llm pi --write --host carrack.patio51.com:9337
+```
+
+### Manual setup
+
+Alternatively, add a `mesh` provider to `~/.pi/agent/models.json` by hand:
+
+```json
+{
+  "providers": {
+    "mesh": {
+      "api": "openai-completions",
+      "apiKey": "mesh",
+      "baseUrl": "http://localhost:9337/v1",
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsUsageInStreaming": true
+      },
+      "models": [
+        {
+          "id": "Qwen 3.6 27B",
+          "name": "Qwen 3.6 27B",
+          "contextWindow": 262144,
+          "maxTokens": 262144
+        },
+        {
+          "id": "Qwen 3.5 4B",
+          "name": "Qwen 3.5 4B",
+          "contextWindow": 65536,
+          "maxTokens": 65536
+        }
+      ]
+    }
+  }
+}
+```
+
+The `models` key belongs inside the provider block and is intentionally last. When mesh metadata includes a context length, `mesh-llm pi --write` also writes Pi's `contextWindow` and `maxTokens` model fields. To choose a model, use an ID from the mesh:
+
+```bash
+curl -s http://localhost:9337/v1/models | jq '.data[].id'
+```
+
+Run Pi:
+
+```bash
+pi --model "mesh/Qwen 3.6 27B"
+```
+
+You can switch models interactively with `Ctrl+M` inside Pi. Pi also supports
+`pi --provider mesh --model <model-id>` and `pi --list-models`.
+
+## Tool-call reliability probe
+
+Use the lightweight QA probe before or after changes that affect agent routing,
+OpenAI chat-completions, tool-call translation, or MoA reducer behavior:
+
+```bash
+cargo xtool automation stability tool-call \
+  --base-url http://127.0.0.1:9337/v1 \
+  --models auto,mesh \
+  --attempts 3 \
+  --output target/agent-tool-call-reliability/results.jsonl
+```
+
+The probe exercises the raw OpenAI-compatible contract directly. For each model
+and attempt it forces a deterministic function call, verifies
+`finish_reason=tool_calls`, sends the matching tool result back, then checks
+that the final answer includes the tool output. Streaming mode is included by
+default and reconstructs `delta.tool_calls[*]` by index before validation.
+
+For a side-effect-free review of the planned checks:
+
+```bash
+cargo xtool automation stability tool-call --models auto,mesh --attempts 2 --print-plan
+```
+
+This complements the heavier Goose, OpenCode, and Pi smoke scripts. Those prove
+real agent CLI behavior; this probe isolates the API contract that those agents
+depend on.
+
+## Nightly stability harness
+
+Use the repeatable stability harness when a branch needs broader live-mesh
+evidence without changing the mesh under test:
+
+```bash
+cargo xtool automation stability nightly \
+  --base-url http://127.0.0.1:9337/v1 \
+  --models auto,mesh \
+  --attempts 5 \
+  --agent-smokes opencode,pi,goose \
+  --output-dir target/nightly-stability/local
+```
+
+The harness attaches to an existing `/v1` endpoint, probes `/v1/models`, normal
+chat, streaming chat, the direct tool-call reliability probe, and optionally the
+OpenCode/Pi/Goose agent smokes. It writes `manifest.json`, `commands.jsonl`,
+`results.jsonl`, `summary.json`, `summary.md`, and logs under the output
+directory. Use `--print-plan` before long runs to inspect the exact check list
+without touching the endpoint or creating artifacts.
+
+Scheduled GitHub runs are opt-in via `MESH_NIGHTLY_STABILITY_ENABLED=1` plus a
+configured endpoint. The scheduled/manual wrapper delegates execution to the
+reusable `nightly-stability-run.yml` workflow, which owns the harness run,
+artifact upload, and timing summary. The reusable workflow uses GitHub-hosted
+Ubuntu and does not accept a caller-selected runner label. Treat this as a
+trend/evidence harness, not a required PR gate.
+
+## curl or any OpenAI client
+
+```bash
+curl http://localhost:9337/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'
+```
+
+## Blackboard
+
+Mesh LLM can also share status, findings, and questions across the mesh through the external `blackboard` plugin.
+
+This works even if you are not using Mesh LLM for model serving. A client-only node is enough:
+
+```bash
+mesh-llm client
+```
+
+Install the plugin:
+
+```bash
+mesh-llm plugins install blackboard
+```
+
+Post a status update:
+
+```bash
+mesh-llm blackboard "STATUS: [org/repo branch:main] refactoring billing module"
+```
+
+Search the feed:
+
+```bash
+mesh-llm blackboard --search "billing refactor"
+mesh-llm blackboard --search "QUESTION"
+```
+
+Messages are ephemeral, scrubbed for obvious PII, and stay inside the mesh.
+Assume posts are visible to every peer in the mesh where the blackboard plugin is
+running. Do not post secrets, credentials, private paths, or customer data.
+
+## Blackboard MCP server
+
+The running mesh node exposes configured plugin tools through the management
+HTTP MCP endpoint at `http://127.0.0.1:3131/mcp`.
+
+Example MCP config:
+
+```json
+{
+  "mcpServers": {
+    "mesh-blackboard": {
+      "type": "http",
+      "url": "http://127.0.0.1:3131/mcp"
+    }
+  }
+}
+```
+
+Exposed tools:
+
+- `blackboard_post`
+- `blackboard_search`
+- `blackboard_feed`
+
+For plugin internals and plugin development, see [plugins/README.md](plugins/README.md).

@@ -1,0 +1,124 @@
+# llama.cpp changed-pin canary developer task
+
+You are working on a trusted `main` checkout on the `family-certify`
+self-hosted runner. Complete the llama.cpp upstream update as one developer
+task. The harness has written the exact target SHA to
+`skippy/llama_cpp/upstream.txt` and `.deps/llama-canary-target-sha`.
+
+Read `.agents/skills/llama-patch-changes/SKILL.md` before changing the queue.
+When the stage ABI changes, also read
+`.agents/skills/llama-stage-patch-changes/SKILL.md`. Their patch ownership,
+queue reconstruction, ABI, and validation rules are requirements.
+
+Do not write new Python tooling during repair, including temporary or inline
+helpers. Follow `.agents/skills/manage-ci/SKILL.md` for new repository
+automation in typed `tools/xtask` commands; from the repository root,
+`cargo xtool repo-consistency ci-crate-lists` is an existing alias example.
+The existing patch generator below is transitional and stays in use until an
+equivalent Rust command has passed parity checks. This does not grant permission
+to edit the trusted scripts or CI boundary listed below.
+
+Own the repair end to end:
+
+1. Run `scripts/prepare-llama.sh pinned` and inspect the first real failure. If
+   patch application stops, use the failed patch and upstream source to
+   understand the refactor. Reconstruct the affected capability commits on the
+   target llama.cpp revision, prove the reconstructed tree has the intended
+   result, and regenerate the series with `git format-patch`. Repeating
+   `git am --3way` without resolving the semantic conflict is not a repair.
+2. Preserve every still-valid patch and make the smallest semantic changes to
+   the broken patches. Keep the queue ordered. Do not delete instrumentation or
+   weaken a gate to get a build through.
+3. Generate model-builder stage controls through the Clang rewriter and
+   `cargo xtool automation native-generator generate` with absolute `--git`
+   and `--rewriter` paths and `--max-diff-bytes 16777216`. Do not hand-edit per-family stage
+   filtering or `begin_block`/`end_block` patches. Extend general AST rules for
+   conventional upstream shapes. Preserve an exact `unsupported_shape` refusal
+   for irregular builders until a sound general rule exists.
+4. Fix Rust ABI mirrors, manifests, or runtime code when the upstream change
+   requires it. Bump the prepare schema and ABI version together where the
+   repository skills require that. A model row may change only when runtime
+   evidence shows that its immutable manifest data is stale.
+5. Run prepare, the complete patched llama.cpp build with upstream tests, the
+   generated-family check, affected Rust package checks, and focused smoke or
+   real-model reproductions for your repairs. Inspect failures and fix them.
+   Run every build and test command through
+   `scripts/llama-canary-log-command.sh <short-label> <command> [args...]`.
+   For build or test commands containing pipelines, use `bash -o pipefail -c`
+   as the command argument so failures in earlier pipeline stages are reported.
+   For commands requiring shell syntax without pipelines, use `bash -c`.
+   The wrapper streams output, preserves the command's exit status, and saves a
+   separate full log for each invocation in the canary's 14-day build evidence
+   artifact. Use it on failed reproductions and retries too. Do not put secrets
+   in command output or labels.
+   Keep build and test commands in the foreground. If you start any background
+   command, record its PID, wait for it to exit, and check its exit status before
+   returning. Do not leave `nohup`, detached, or still-running build and test
+   processes behind: the harness must stop remaining process-group members
+   before it can safely verify your working tree.
+   Once those checks pass, return control to the trusted harness. Do not run
+   an additional full family battery inside the coding session: the wrapper
+   runs every canonical gate, including the complete roster, after you return.
+   If it finds a failure, use the supplied logs to reproduce and fix that
+   failure, then return for the next trusted pass. Report the exact checks you
+   ran and remaining uncertainties; a focused pass is not certification.
+
+The models are already available in the runner's `HF_CACHE`. Stay offline and
+do not add Actions caching or download logic. Full family certification must
+retain all planned single-step, chain, state-handoff, native draft, and
+multimodal lanes. Package-v2 product coverage runs in the required pull-request
+checks after the canary publishes a candidate.
+
+Leave the finished changes uncommitted in the current mesh-llm checkout. Do not
+change the target pin, create or switch branches, commit, push, use GitHub
+credentials, or open or edit a pull request. Do not edit `.github/`,
+`.agents/`, any file under `scripts/`, `ci/ci.md`, or this runbook. Those files
+define the trusted verification boundary. Repair the patch queue, rewriter
+implementation, Rust code, and model manifests that the fixed gates exercise.
+
+Manifest edits are deliberately narrow. In
+`ci/llama-canary/family-certified.json`, keep the roster, artifact identities,
+lanes, execution policy, and every other field unchanged; only
+`resources.estimated_model_bytes` may be corrected from the immutable GGUF
+tensor scan. In `skippy/docs/llama-parity-candidates.json`, keep every existing
+row and all top-level policy unchanged. Append exactly one classification row
+for each source file missing from the manifest. New rows are limited to the
+classification fields `llama_model`, `family`, `status`, and optional `notes`
+or `unsupported_reason`; do not add artifact selectors, source revisions,
+integrity records, or execution settings such as `repo`, `include`, `revision`,
+`file_integrity`, `splits`, `recurrent`, `model_pin`, or `artifact_id`. A new
+boundary-registered source must remain a runnable candidate. The trusted
+wrapper checks these limits before it accepts the tree, and the full battery
+independently verifies every corrected tensor-byte value against the pinned
+local artifact.
+
+Returning from the coding session is not certification. The trusted harness
+runs prepare, manifest-policy, build and smoke gates; local failures return to
+the same named session within the coding admission window. Once those gates
+pass, the job exports an uncertified immutable candidate and releases its
+runner. Separate jobs certify every family using the exact producer binaries.
+
+A failed family pass or independent verification supplies its candidate and
+confirmed candidate failure logs to a new session in the next attempt. Read
+those logs before continuing. Runner/workflow failures and missing receipts
+are first rechecked only for the affected families on the same immutable
+candidate without invoking this agent; valid candidate failures from a mixed
+pass are retained. Repeated infrastructure failure, corrupt/foreign evidence,
+and other contract failures stop without starting another session. There are
+at most three distributed repair attempts; every edit requires a new complete
+build and family pass. Both the first full family pass and the fresh independent
+build/family pass must be green on the same commit before the hosted publisher
+can create a branch or PR.
+
+## New upstream model families
+
+Run the source rewriter across every `src/models/*.cpp` translation unit. A new
+conventional builder belongs in the consolidated generated patch without a
+family-specific rule or checkpoint. If it reports `unsupported_shape`, add a
+general AST rule only when the activation loop and ownership edits can be
+proved. Never use an architecture name or tensor spelling as the eligibility
+predicate.
+
+Source coverage alone does not add a family manifest row or trigger a model
+download. Add or change a row only for an independent numeric, backend, or
+state-pattern reason backed by immutable artifact evidence.

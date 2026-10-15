@@ -1,0 +1,33 @@
+//! Transactional reducer: ordering, degradation, and rebuild policy.
+//!
+//! Pure by construction — `apply` and `rebuild` are `(snapshot, input) ->
+//! new snapshot | rejection` functions with no I/O and no locking. The
+//! owning `Mutex<Arc<ReducerSnapshot>>` (see `engine::drain`) is the ONLY
+//! lock this subsystem introduces, and it is disjoint from the reservation
+//! table's per-slot locks used by native ingress, satisfying the
+//! lock-separation requirement structurally rather than by convention.
+//!
+//! Publication is post-acceptance: a caller must only append a replay frame
+//! and fan out to subscribers when `apply` returns `Applied`. A `Rejected`
+//! input is invisible on the stream by construction — there is no code path
+//! from a `Rejected` outcome to `ReplayBuffer::push` /
+//! `SubscriberRegistry::publish`.
+
+mod apply;
+mod domain;
+mod rebuild;
+mod state;
+
+#[cfg(test)]
+mod tests;
+
+pub use apply::{ReduceOutcome, ReducerInput, apply, evict};
+pub use domain::{
+    ACTIVE_WARNING_BOUND, CacheDomainState, DeviceDomainState, DiagnosticDomainState,
+    DiagnosticEntry, DomainState, EventSystemHealthDomainState, ModelDomainState,
+    NODE_CAPACITY_KEY_BOUND, NativeRuntimeDomainState, NodeAvailabilityDomainState,
+    RequestDomainState, RequestGenerationState, RequestPrefillState, SessionRecentEntry,
+    StageDomainState, WARNING_CORRELATION_KEY,
+};
+pub use rebuild::{RebuildError, RebuildOutcome, rebuild};
+pub use state::{OperationState, ReducerSnapshot, RejectReason};

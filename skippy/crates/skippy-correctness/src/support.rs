@@ -1,0 +1,234 @@
+use std::{
+    net::{SocketAddr, TcpStream},
+    path::PathBuf,
+    process::{Child, Command, ExitStatus},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use skippy_protocol::binary::{
+    StageActivationDesc, StageActivationPartDesc, encode_activation_frame, recv_ready,
+};
+
+pub struct ChildGuard {
+    child: Child,
+}
+
+impl ChildGuard {
+    pub fn spawn(mut command: Command) -> Result<Self> {
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn {:?}", command))?;
+        Ok(Self { child })
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        self.child.try_wait().context("poll child process")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub fn connect_ready(addr: SocketAddr, timeout_secs: u64) -> Result<TcpStream> {
+    connect_ready_until(addr, timeout_secs, || Ok(()))
+}
+
+pub fn connect_ready_child(
+    addr: SocketAddr,
+    timeout_secs: u64,
+    child: &mut ChildGuard,
+) -> Result<TcpStream> {
+    connect_ready_until(addr, timeout_secs, || {
+        if let Some(status) = child.try_wait()? {
+            bail!("child process exited before readiness with status {status}");
+        }
+        Ok(())
+    })
+}
+
+fn connect_ready_until(
+    addr: SocketAddr,
+    timeout_secs: u64,
+    mut check_child: impl FnMut() -> Result<()>,
+) -> Result<TcpStream> {
+    let attempts = timeout_secs.saturating_mul(2).max(1);
+    let mut last_error = None;
+    for _ in 0..attempts {
+        check_child()?;
+        match TcpStream::connect(addr) {
+            Ok(mut stream) => {
+                stream.set_nodelay(true).ok();
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(500)))
+                    .ok();
+                stream
+                    .set_write_timeout(Some(Duration::from_millis(500)))
+                    .ok();
+                match recv_ready(&mut stream) {
+                    Ok(()) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(timeout_secs.max(1))))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(timeout_secs.max(1))))
+                            .ok();
+                        return Ok(stream);
+                    }
+                    Err(error) => {
+                        last_error = Some(anyhow!(error).context("ready handshake failed"))
+                    }
+                }
+            }
+            Err(error) => last_error = Some(anyhow!(error).context("connect failed")),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    check_child()?;
+    Err(last_error.unwrap_or_else(|| anyhow!("timed out")))
+}
+
+pub fn activation_width(frame: &skippy_runtime::ActivationFrame) -> Result<i32> {
+    let primary = frame
+        .desc
+        .parts()?
+        .first()
+        .context("activation frame has no primary part")?;
+    // Width counts elements outside the token axis. Typed sidebands may be
+    // ordered before floating-point hidden states in a multipart frontier.
+    let rank = usize::try_from(primary.rank).context("primary activation rank exceeds usize")?;
+    anyhow::ensure!(
+        rank > 0 && rank <= primary.dimensions.len(),
+        "primary activation part has an invalid rank"
+    );
+    let token_axis = usize::try_from(primary.token_axis)
+        .context("primary activation part has a negative token axis")?;
+    anyhow::ensure!(
+        token_axis < rank,
+        "primary activation part has an invalid token axis"
+    );
+    let mut width = 1_u64;
+    for (axis, dimension) in primary.dimensions.iter().copied().enumerate().take(rank) {
+        if axis != token_axis {
+            width = width
+                .checked_mul(u64::try_from(dimension).context("invalid activation dimension")?)
+                .context("activation width overflow")?;
+        }
+    }
+    i32::try_from(width).context("activation width exceeds i32")
+}
+
+pub fn encode_runtime_activation(
+    codec: skippy_protocol::StageActivationCodec,
+    frame: &skippy_runtime::ActivationFrame,
+) -> Result<Vec<u8>> {
+    let desc = StageActivationDesc {
+        version: frame.desc.version,
+        producer_stage_index: frame.desc.producer_stage_index,
+        layer_start: frame.desc.layer_start,
+        layer_end: frame.desc.layer_end,
+        token_count: frame.desc.token_count,
+        sequence_count: frame.desc.sequence_count,
+        payload_bytes: frame.desc.payload_bytes,
+        frontier_identity: frame.desc.frontier_identity,
+        parts: frame
+            .desc
+            .parts()?
+            .iter()
+            .map(|part| StageActivationPartDesc {
+                identity: part.identity,
+                ggml_type: part.ggml_type,
+                rank: part.rank,
+                token_axis: part.token_axis,
+                flags: part.flags,
+                dimensions: part.dimensions,
+                byte_strides: part.byte_strides,
+                payload_offset: part.payload_offset,
+                payload_bytes: part.payload_bytes,
+            })
+            .collect(),
+    };
+    encode_activation_frame(codec, &desc, &frame.payload)
+        .context("failed to encode multipart activation frame")
+}
+
+pub fn generate_run_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis();
+    format!("correctness-{millis}")
+}
+
+pub fn temp_config_path_for(run_id: &str, stage_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{run_id}-{stage_id}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::{SocketAddr, TcpListener},
+        process::{Command, Stdio},
+    };
+
+    use super::{ChildGuard, activation_width, connect_ready_child};
+
+    #[test]
+    fn integer_frontier_width_uses_shape_without_reinterpreting_payload() -> anyhow::Result<()> {
+        let mut parts =
+            [skippy_runtime::ActivationPartDesc::default(); skippy_runtime::ACTIVATION_MAX_PARTS];
+        parts[0] = skippy_runtime::ActivationPartDesc {
+            ggml_type: skippy_runtime::GGML_TYPE_I32,
+            rank: 2,
+            token_axis: 1,
+            dimensions: [8, 3, 1, 1],
+            ..Default::default()
+        };
+        let frame = skippy_runtime::ActivationFrame {
+            desc: skippy_runtime::ActivationDesc {
+                version: skippy_runtime::ACTIVATION_FRAME_VERSION,
+                producer_stage_index: 0,
+                layer_start: 0,
+                layer_end: 1,
+                part_count: 1,
+                token_count: 3,
+                sequence_count: 1,
+                payload_bytes: 0,
+                frontier_identity: [0; skippy_runtime::ACTIVATION_IDENTITY_BYTES],
+                parts,
+            },
+            payload: Vec::new(),
+        };
+        assert_eq!(activation_width(&frame)?, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_reports_a_child_that_exits_before_listening() -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr: SocketAddr = listener.local_addr()?;
+        drop(listener);
+
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--list")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = ChildGuard::spawn(command)?;
+
+        let error = connect_ready_child(addr, 10, &mut child)
+            .expect_err("short-lived child must be reported")
+            .to_string();
+
+        assert!(
+            error.contains("child process exited before readiness with status"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+}

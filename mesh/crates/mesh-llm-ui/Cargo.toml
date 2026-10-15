@@ -1,0 +1,20 @@
+[package]
+name = "mesh-llm-ui"
+version.workspace = true
+edition = "2024"
+description = "Embedded Mesh LLM web console assets"
+license = "Apache-2.0"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+readme = "README.md"
+
+[features]
+# Embed the built React console (dist/) into the binary via include_dir!.
+# Default on so the shipped binary keeps shipping the web console.
+# Turn off (`default-features = false`) for headless / lib-style consumers
+# that want to drop the ~5–6 MB of embedded assets.
+default = ["embed-assets"]
+embed-assets = ["dep:include_dir"]
+
+[dependencies]
+include_dir = { version = "0.7", optional = true }
