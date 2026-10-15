@@ -1,0 +1,16 @@
+DARM-ANN-LLM
+Copyright (c) 2026 Ben H
+
+This repository is licensed under the GNU General Public License v3.0 (see
+LICENSE), with the following components under their own licenses:
+
+- mesh-llm (mesh/, skippy/, tools/ and the root workspace files), imported
+  from https://github.com/bnreplah/mesh-llm, a fork of
+  https://github.com/Mesh-LLM/mesh-llm. Licensed under the Apache License,
+  Version 2.0 (licenses/mesh-llm-Apache-2.0.txt); individual crates declare
+  "MIT OR Apache-2.0". Modifications are listed in darm/UPSTREAM.md.
+
+- DARM-ANN crates (darm/crates/) and the legacy proof of concept
+  (darm/legacy-poc/), licensed under the MIT License, matching
+  https://github.com/bnreplah/DARM-ANN, so the DARM-ANN infrastructure
+  repository can depend on them.

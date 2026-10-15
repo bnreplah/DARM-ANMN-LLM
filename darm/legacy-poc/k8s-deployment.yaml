@@ -1,0 +1,78 @@
+# Kubernetes deployment (k8s-deployment.yaml)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: consciousness
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consciousness-coordinator
+  namespace: consciousness
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consciousness-coordinator
+  template:
+    metadata:
+      labels:
+        app: consciousness-coordinator
+    spec:
+      containers:
+      - name: coordinator
+        image: consciousness:latest
+        env:
+        - name: NODE_TYPE
+          value: "coordinator"
+        - name: NODE_ID
+          value: "coordinator-1"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        ports:
+        - containerPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consciousness-logical
+  namespace: consciousness
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: consciousness-logical
+  template:
+    metadata:
+      labels:
+        app: consciousness-logical
+    spec:
+      containers:
+      - name: logical
+        image: consciousness:latest
+        env:
+        - name: NODE_TYPE
+          value: "logical"
+        - name: SPECIALIZATIONS
+          value: "programming,analysis,mathematics"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consciousness-emotional
+  namespace: consciousness
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consciousness-emotional
+  template:
+    metadata:
+      labels:
+        app: consciousness-emotional

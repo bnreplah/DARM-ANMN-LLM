@@ -58,6 +58,7 @@ COPY Cargo.toml Cargo.lock ./
 # extra context and invalidates the same downstream layers as the list did.
 COPY mesh/crates/ mesh/crates/
 COPY skippy/crates/ skippy/crates/
+COPY darm/crates/ darm/crates/
 COPY tools/xtask/ tools/xtask/
 COPY scripts/ scripts/
 COPY skippy/scripts/ skippy/scripts/
@@ -88,6 +89,7 @@ COPY Cargo.toml Cargo.lock ./
 # Same rationale as the rust-deps stage above: copy the whole tree, not a list.
 COPY mesh/crates/ mesh/crates/
 COPY skippy/crates/ skippy/crates/
+COPY darm/crates/ darm/crates/
 COPY tools/xtask/ tools/xtask/
 RUN --mount=type=cache,id=mesh-llm-cargo-registry-debian-bookworm-rust-stable-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=mesh-llm-cargo-git-debian-bookworm-rust-stable-${TARGETARCH},target=/root/.cargo/git,sharing=locked \

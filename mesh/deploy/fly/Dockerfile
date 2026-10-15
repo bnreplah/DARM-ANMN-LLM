@@ -51,6 +51,7 @@ COPY Cargo.toml Cargo.lock ./
 # extra context and invalidates the same downstream layers as the list did.
 COPY mesh/crates/ mesh/crates/
 COPY skippy/crates/ skippy/crates/
+COPY darm/crates/ darm/crates/
 COPY tools/xtask/ tools/xtask/
 COPY scripts/ scripts/
 COPY skippy/scripts/ skippy/scripts/

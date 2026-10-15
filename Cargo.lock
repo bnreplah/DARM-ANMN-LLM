@@ -2322,6 +2322,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "darm-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "darm-memory"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "darm-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "darm-mesh-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "darm-core",
+ "darm-memory",
+ "darm-swarm",
+ "mesh-llm-plugin",
+ "reqwest 0.13.5",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "darm-swarm"
+version = "0.1.0"
+dependencies = [
+ "darm-core",
+ "serde",
+]
+
+[[package]]
 name = "dary_heap"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4931,6 +4983,7 @@ dependencies = [
  "chrono",
  "crossbeam-queue",
  "crossterm",
+ "darm-mesh-plugin",
  "dirs",
  "ed25519-dalek",
  "futures-util",

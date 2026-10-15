@@ -1,0 +1,106 @@
+
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # Coordinator Node
+  coordinator:
+    build: .
+    environment:
+      - NODE_TYPE=coordinator
+      - NODE_ID=coordinator-1
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    ports:
+      - "8080:8080"
+    networks:
+      - consciousness-net
+
+  # Logical Processing Nodes
+  logical-1:
+    build: .
+    environment:
+      - NODE_TYPE=logical
+      - NODE_ID=logical-1
+      - SPECIALIZATIONS=programming,analysis
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=http://coordinator:8080
+    depends_on:
+      - coordinator
+      - redis
+    networks:
+      - consciousness-net
+
+  logical-2:
+    build: .
+    environment:
+      - NODE_TYPE=logical
+      - NODE_ID=logical-2
+      - SPECIALIZATIONS=mathematics,optimization
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=http://coordinator:8080
+    depends_on:
+      - coordinator
+      - redis
+    networks:
+      - consciousness-net
+
+  # Emotional Processing Node
+  emotional-1:
+    build: .
+    environment:
+      - NODE_TYPE=emotional
+      - NODE_ID=emotional-1
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=http://coordinator:8080
+    depends_on:
+      - coordinator
+      - redis
+    networks:
+      - consciousness-net
+
+  # Memory Node
+  memory-1:
+    build: .
+    environment:
+      - NODE_TYPE=memory
+      - NODE_ID=memory-1
+      - REDIS_URL=redis://redis:6379
+      - COORDINATOR_URL=http://coordinator:8080
+    depends_on:
+      - coordinator
+      - redis
+    networks:
+      - consciousness-net
+
+  # Redis for inter-node communication and memory persistence
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - consciousness-net
+
+  # Web interface for monitoring (optional)
+  web-interface:
+    build: .
+    command: python web_interface.py
+    environment:
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+      - coordinator
+    networks:
+      - consciousness-net
+
+volumes:
+  redis-data:
+
+networks:
+  consciousness-net:
+    driver: bridge

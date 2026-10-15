@@ -78,6 +78,10 @@ members = [
     "mesh/crates/mesh-mixture-of-agents",
     "mesh/crates/mesh-llm-moa-plugin",
     "tools/xtask",
+    "darm/crates/darm-core",
+    "darm/crates/darm-memory",
+    "darm/crates/darm-swarm",
+    "darm/crates/darm-mesh-plugin",
     "tools/trajectory-reader",
 ]
 default-members = [

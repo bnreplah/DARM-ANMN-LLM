@@ -965,16 +965,43 @@ pub(super) async fn start_run_auto_node_and_plugins(
         )
         .await);
     }
+    if resolved_plugins
+        .externals
+        .iter()
+        .any(|spec| spec.name == plugin::DARM_PLUGIN_ID)
+    {
+        return Err(cleanup_failed_node_start(
+            &node,
+            anyhow::anyhow!(
+                "Plugin name '{}' is reserved for the built-in DARM-ANN plugin",
+                plugin::DARM_PLUGIN_ID
+            ),
+        )
+        .await);
+    }
     let mut moa_spec = plugin::in_process_builtin_spec(plugin::MOA_PLUGIN_ID);
     moa_spec.startup.optional = false;
     resolved_plugins.externals.push(moa_spec);
+    let darm_enabled = plugin::darm_builtin_enabled();
+    if darm_enabled {
+        // Optional: if DARM-ANN cannot start (e.g. an unreadable identity
+        // key) the node still serves as plain mesh-llm.
+        resolved_plugins
+            .externals
+            .push(plugin::in_process_builtin_spec(plugin::DARM_PLUGIN_ID));
+    }
     #[cfg(feature = "payments")]
     let in_process = crate::network::payments::in_process_plugins(&node);
     #[cfg(not(feature = "payments"))]
     let in_process = plugin::InProcessPlugins::default();
     let moa_runner: plugin::InProcessPluginRunner =
         std::sync::Arc::new(|stream| Box::pin(mesh_llm_moa_plugin::run(stream)));
-    let in_process = in_process.with(plugin::MOA_PLUGIN_ID, moa_runner);
+    let mut in_process = in_process.with(plugin::MOA_PLUGIN_ID, moa_runner);
+    if darm_enabled {
+        let darm_runner: plugin::InProcessPluginRunner =
+            std::sync::Arc::new(|stream| Box::pin(darm_mesh_plugin::run(stream)));
+        in_process = in_process.with(plugin::DARM_PLUGIN_ID, darm_runner);
+    }
     let plugin_manager = match plugin::PluginManager::start_with_in_process(
         &resolved_plugins,
         plugin_host_mode(options),

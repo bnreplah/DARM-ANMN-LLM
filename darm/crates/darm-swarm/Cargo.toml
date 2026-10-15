@@ -1,0 +1,15 @@
+[package]
+name = "darm-swarm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "DARM-ANN biomimetic swarm layer: node lifecycle, pheromone routing, reputation and governed replication"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+darm-core = { path = "../darm-core", version = "0.1.0" }
+serde = { workspace = true }

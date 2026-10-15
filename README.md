@@ -1,3 +1,36 @@
+<h1 align="center">DARM-ANN-LLM</h1>
+
+**DARM-ANN-LLM** is [mesh-llm](#mesh-llm) with the DARM-ANN (Distributed
+Agentic Resilient Memory over Artificial Neural Networks) framework built in.
+Every node keeps pooling GPUs and serving one OpenAI-compatible API, and also:
+
+- serves a **`darm` virtual model** that recalls relevant memories from a
+  signed, distributed memory, routes the turn across the mesh's models by
+  ant-colony **pheromone trails**, and learns from every outcome;
+- shares memories through a **quorum-finalized ledger** (Ed25519-signed
+  entries, blocks final at more than two thirds of validator weight) gossiped
+  over the mesh's peer-to-peer transport, with Merkle proofs for anchoring on
+  Ethereum;
+- runs the **biomimetic swarm** lifecycle (health, energy, reputation,
+  genomes) with replication gated by validator votes instead of autonomous
+  spawning.
+
+Start with [`darm/README.md`](darm/README.md) for architecture, configuration
+and the security model. Server and infrastructure (archive node, Ethereum
+anchor contract, Docker/Kubernetes, the wire protocol spec) live in
+[`bnreplah/DARM-ANN`](https://github.com/bnreplah/DARM-ANN). Licensing and
+provenance: [`NOTICE`](NOTICE), [`darm/UPSTREAM.md`](darm/UPSTREAM.md).
+
+```bash
+mesh-llm serve --auto            # DARM is on by default (MESH_LLM_DARM=off to disable)
+curl http://localhost:9337/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"darm","messages":[{"role":"user","content":"hello"}]}'
+```
+
+---
+
+<a id="mesh-llm"></a>
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="mesh/docs/mesh-llm-wordmark.png">

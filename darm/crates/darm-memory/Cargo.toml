@@ -1,0 +1,20 @@
+[package]
+name = "darm-memory"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "DARM-ANN distributed associative memory: signed content-addressed records, tiered decay, retrieval and gossip sync"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3.workspace = true
+darm-core = { path = "../darm-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -118,6 +118,22 @@ pub const RETIRED_WALLET_LEXE_PLUGIN_ID: &str = "wallet-lexe";
 /// capability. Registered only with the `payments` feature.
 pub const PAYMENTS_PLUGIN_ID: &str = "payments";
 pub const MOA_PLUGIN_ID: &str = mesh_llm_moa_plugin::PLUGIN_ID;
+/// Built-in DARM-ANN plugin: distributed memory, ledger and swarm routing
+/// behind the `darm` virtual model. Optional: a failure to start it degrades
+/// to plain mesh-llm. Set `MESH_LLM_DARM=off` to not start it at all.
+pub const DARM_PLUGIN_ID: &str = darm_mesh_plugin::PLUGIN_ID;
+
+/// Whether the operator left the built-in DARM-ANN plugin enabled.
+pub fn darm_builtin_enabled() -> bool {
+    !matches!(
+        std::env::var("MESH_LLM_DARM")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "off" | "false" | "no" | "disabled"
+    )
+}
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 #[cfg(test)]
