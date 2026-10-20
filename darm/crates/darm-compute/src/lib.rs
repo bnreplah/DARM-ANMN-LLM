@@ -26,17 +26,22 @@
 //! that each node's operator chose to serve; the pool only plans, measures
 //! and verifies.
 
+pub mod admission;
 pub mod advert;
 pub mod device;
 pub mod pool;
 pub mod receipt;
 pub mod sizing;
 
+pub use admission::{ModeledAdmission, Threshold, admission_probability};
 pub use advert::{CapabilityAdvert, SignedAdvert};
 pub use device::{
     Backend, ComputeProfile, Conditions, ContributionPolicy, Device, DeviceKind, FormFactor,
     OfferedDevice, Thermal, WorkloadKind,
 };
-pub use pool::{Assignment, ComputePool, DevicePreference, JobPlan, JobSpec, PoolSummary};
+pub use pool::{
+    Assignment, ComputePool, DevicePreference, JobPlan, JobSpec, PlanContext, PoolSummary,
+    SyncClass,
+};
 pub use receipt::{ShardVerdict, SignedReceipt, Tally, WorkReceipt, tally};
 pub use sizing::ShardSizer;

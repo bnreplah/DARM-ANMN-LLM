@@ -88,13 +88,16 @@ both at once, and a phone can join and draw on the whole pool:
   training shards, verification, inference) across CPU, GPU and NPU slots in
   proportion to effective throughput by smooth weighted round robin, or
   restricts it with `cpu_only` / `gpu_only` / `prefer_*`. Each shard gets
-  `redundancy` replicas on distinct nodes; `same_kind_replicas` keeps
-  replicas on one device kind when CPU and GPU kernels round differently.
+  `redundancy` replicas on distinct nodes, preferring different backends;
+  `same_kind_replicas` keeps replicas on one device kind when CPU and GPU
+  kernels round differently. `threshold` sets the admission quorum,
+  `spot_check` adds hidden extra replicas, and `sync_class` applies the
+  Locality Doctrine (see [Whitepaper alignment](#whitepaper-alignment)).
   Each assignment carries a suggested shard size so a phone gets small
   shards and a GPU large ones (adaptive sizing toward a target duration).
 - **Proof of useful work**: workers sign receipts (`darm_compute_receipt`);
   `darm_compute_tally` accepts only receipts from assigned workers over the
-  planned inputs, takes the strict-majority output per shard, names
+  planned inputs, takes the output reaching the job's threshold, names
   dissenters (evidence for validator reputation reports), feeds measured
   throughput back into the scheduler, and with `commit: true` writes a
   `ComputeCommit` (job, result root, receipt root) to the ledger. This
@@ -107,6 +110,33 @@ both at once, and a phone can join and draw on the whole pool:
 
 Nothing in the pool executes remote code: workloads are named kinds that each
 operator chose to serve; DARM plans, measures and verifies.
+
+## Whitepaper alignment
+
+How the DARM-ANN papers map onto this code, and at what epistemic status
+(Volume 1 §45 labels: theorem, proposition, engineering estimate,
+hypothesis).
+
+| Paper concept | Where | Notes |
+|---|---|---|
+| CDCP admission threshold τ_c (Paper 1 §3, Vol. 1 §11) | `darm_compute::admission::Threshold`, job `threshold`, `DARM_ADMISSION_THRESHOLD` | Results are admitted at `⌈τ_c·n⌉` of a shard's replicas; short of quorum the shard abstains (`disputed`/`missing`) rather than guessing — ESE's third outcome (Paper 2 §5). |
+| Corrected P39 admission bound (Paper 1 §6, Vol. 1 §41) | `darm_compute::admission::admission_probability` | Gaussian-copula integral; the tests reproduce the papers' tables (2.1e-9 … 7.1e-42) and Hypothesis H1's 2.2× (more nodes) vs 17.6× (τ_c 2/3→0.9) at ρ = 0.5. Plan responses report it labelled **modeled**: ρ is assumed, not measured. |
+| ρ reduction by diversity (Paper 2, Vol. 1.1 §3) | planner `diverse_replicas`, plan `mean_backend_diversity` | Replicas of a shard prefer different backends. Diversity is reported as an observable proxy, not converted into a ρ value the code cannot know. |
+| New-node vote weighting (Vol. 1 §11) | `ComputePool::with_min_age`, `DARM_POOL_MIN_AGE_MS` | Linear ramp; default 10 min rather than the paper's 60 s, per Vol. 1.1 §3's note that 60 s suits only a mature network. |
+| Bootstrap security phases (Vol. 1.1 §3.1, BS1) | `ValidatorSet::security_phase`, `darm_status.ledger.security_phase` | The `>2/3` finality rule already equals Phase A's rule (unanimity at 3, N−1 at 4–6; tested). Unsponsored compute workers' trust ceiling rises with the phase (0.1 → 0.3 → 0.5). |
+| Redundant spot-execution, P66/P67 (v7.2 §4.3) | job `spot_check`, plan `p67_undetected_fraud_bound` | A keyed hash marks shards for a hidden extra replica; `(1−q)^k` is reported. |
+| Locality Doctrine `sync_class` (v7.2 §4.5) | job `sync_class` | `tight` stays on the coordinator, `pipeline` needs measured session RTT ≤ 30 ms, `block`/`async` go anywhere. |
+| PoUI / ATTEST receipts (v7.2 §4.3) | `darm_compute::receipt`, ledger `ComputeCommit` | Proof of useful work recorded on the quorum-finalized chain. |
+| Signed capability prefixes (v7.2 §2.2) | `darm_compute::advert` | TTL-scoped, replay-protected, optionally bound to the mesh endpoint by the host. |
+| Tier routing (Paper 3) | `darm.tier` = `tiny`/`mid`/`consolidator` | Narrows candidates by parameter count when any match; never empties the pool. Speculative decoding across tiers is not implemented (Paper 3 shows it only pays when the mid tier is a real filter). |
+| Consensus ≠ truth (Vol. 1 §45) | injected memories carry `status="consensus-validated"` or `"unconfirmed"` | The preamble says finalized memories are system belief, not verified fact. |
+| Three-plane separation (Vol. 1.1 §2) | design | Compute operations plan, measure and verify; they never execute code or write model weights. |
+
+Not implemented here, by design or pending evidence: the privacy plane's
+onion routing (Vol. 1.1 §4 flags its missing content-policy layer as the
+design's largest open gap), token settlement and staking (Vol. 1.1 §9 legal
+review items), and a measured ρ for real validators (Paper 2 §6, the
+central open experiment).
 
 ## Sessions: polymorphic and adaptive protocols
 
@@ -154,6 +184,9 @@ handshake with each peer and seals gossip to peers that completed one:
 | `DARM_POOL_SHARE_PCT` | 100 (50 phones) | Share of each device offered. |
 | `DARM_POOL_REQUIRE_CHARGING` / `DARM_POOL_MIN_BATTERY_PCT` / `DARM_POOL_ALLOW_METERED` | form factor | Battery and data-plan consent. |
 | `DARM_METERED` | `0` | Start in a metered-network state. |
+| `DARM_ADMISSION_THRESHOLD` | `2/3` | Default CDCP admission threshold τ_c for compute results (`2/3`, `4/5`, `0.9`; must exceed 1/2). Use ≥ `4/5` for high-risk work or when worker correlation is unknown. |
+| `DARM_POOL_MIN_AGE_MS` | 600000 | New-node weight ramp: a peer's scheduling weight grows linearly to full over this time. 0 disables. |
+| `DARM_ASSUMED_P_NODE` | 0.01 | Per-worker miss rate assumed by *modeled* guarantees in plan responses (Paper 1's conservative point). An assumption, not a measurement. |
 
 A three-node private chain: run each node once to create its identity
 (`darm_status` shows `node_id`), then on every node set the same

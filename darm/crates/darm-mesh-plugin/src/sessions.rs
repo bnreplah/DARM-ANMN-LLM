@@ -89,6 +89,15 @@ impl Sessions {
         self.sessions.get(peer).map(Session::peer)
     }
 
+    /// Smoothed RTT to the mesh peer whose session proved `node`.
+    pub fn rtt_to(&self, node: &NodeId) -> Option<f64> {
+        self.sessions
+            .iter()
+            .find(|(_, s)| s.peer() == *node)
+            .and_then(|(peer, _)| self.links.get(peer))
+            .and_then(|link| link.link.srtt_ms)
+    }
+
     pub fn tuning(&self, peer: &str) -> Tuning {
         self.links.get(peer).map_or_else(
             || AdaptiveController::default().tuning(&self.hints),

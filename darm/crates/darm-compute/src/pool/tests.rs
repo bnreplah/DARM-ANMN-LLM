@@ -1,4 +1,5 @@
 use super::*;
+use crate::admission::Threshold;
 use crate::advert::tests::{NOW, advert, network};
 use crate::device::Device;
 use crate::receipt::{ShardVerdict, SignedReceipt, WorkReceipt, tally};
@@ -13,6 +14,15 @@ fn trust_all(_: &NodeId) -> f64 {
     1.0
 }
 
+fn no_rtt(_: &NodeId) -> Option<f64> {
+    None
+}
+
+const ALL: PlanContext<'static> = PlanContext {
+    trust: &trust_all,
+    rtt_ms: &no_rtt,
+};
+
 fn spec(shards: usize, redundancy: u8, device: DevicePreference) -> JobSpec {
     JobSpec {
         workload: WorkloadKind::Embedding,
@@ -24,6 +34,10 @@ fn spec(shards: usize, redundancy: u8, device: DevicePreference) -> JobSpec {
         min_memory_mb: 0,
         allow_mobile: true,
         same_kind_replicas: false,
+        threshold: Threshold::TWO_THIRDS,
+        spot_check_milli: 0,
+        diverse_replicas: true,
+        sync_class: SyncClass::Async,
         nonce: 7,
     }
 }
@@ -31,7 +45,7 @@ fn spec(shards: usize, redundancy: u8, device: DevicePreference) -> JobSpec {
 /// Two CPU-only servers and one server with a GPU 10x a CPU.
 fn pool() -> (ComputePool, Vec<NodeIdentity>) {
     let ids: Vec<NodeIdentity> = (1..=3).map(identity).collect();
-    let mut pool = ComputePool::new(network());
+    let mut pool = ComputePool::new(network()).with_min_age(0);
     let gpu = Device::parse_gpu("cuda:24576:1280").unwrap();
     for (i, id) in ids.iter().enumerate() {
         let gpus = if i == 2 { vec![gpu.clone()] } else { vec![] };
@@ -49,7 +63,7 @@ fn splits_work_across_cpus_and_gpus_by_weight() {
         .plan(
             spec(120, 1, DevicePreference::Any),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -69,7 +83,7 @@ fn splits_work_across_cpus_and_gpus_by_weight() {
         .plan(
             spec(30, 1, DevicePreference::CpuOnly),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -78,7 +92,7 @@ fn splits_work_across_cpus_and_gpus_by_weight() {
         .plan(
             spec(30, 1, DevicePreference::GpuOnly),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -92,7 +106,7 @@ fn replicas_land_on_distinct_nodes() {
         .plan(
             spec(50, 3, DevicePreference::Any),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -111,7 +125,7 @@ fn replicas_land_on_distinct_nodes() {
         pool.plan(
             spec(1, 4, DevicePreference::Any),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW
         )
         .is_err(),
@@ -128,7 +142,11 @@ fn untrusted_and_mobile_nodes_can_be_excluded() {
     let mut job = spec(40, 1, DevicePreference::Any);
     job.allow_mobile = false;
     let only_first = |n: &NodeId| f64::from(u8::from(*n == ids[0].node_id()));
-    let plan = pool.plan(job, ids[0].node_id(), &only_first, NOW).unwrap();
+    let context = PlanContext {
+        trust: &only_first,
+        rtt_ms: &no_rtt,
+    };
+    let plan = pool.plan(job, ids[0].node_id(), &context, NOW).unwrap();
     assert!(
         plan.assignments
             .iter()
@@ -169,7 +187,7 @@ fn adverts_replay_and_peer_binding() {
 
 #[test]
 fn pool_capacity_is_bounded() {
-    let mut pool = ComputePool::with_capacity(network(), 2);
+    let mut pool = ComputePool::with_capacity(network(), 2).with_min_age(0);
     for seed in 1..=2 {
         pool.upsert(
             advert(&identity(seed), 1, vec![], FormFactor::Server),
@@ -193,7 +211,7 @@ fn pool_capacity_is_bounded() {
 #[test]
 fn measurement_corrects_overstated_hardware() {
     let ids: Vec<NodeIdentity> = (1..=2).map(identity).collect();
-    let mut pool = ComputePool::new(network());
+    let mut pool = ComputePool::new(network()).with_min_age(0);
     // Node 1 claims a 10x GPU but delivers like node 0's GPU.
     let honest = Device::parse_gpu("cuda:8192:1000").unwrap();
     let liar = Device::parse_gpu("cuda:8192:10000").unwrap();
@@ -219,7 +237,7 @@ fn measurement_corrects_overstated_hardware() {
         .plan(
             spec(100, 1, DevicePreference::GpuOnly),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -270,7 +288,7 @@ fn majority_tally_flags_dissent_and_commits() {
         .plan(
             spec(4, 3, DevicePreference::Any),
             ids[0].node_id(),
-            &trust_all,
+            &ALL,
             NOW,
         )
         .unwrap();
@@ -344,5 +362,153 @@ fn job_ids_commit_to_coordinator_and_parameters() {
         spec(1, MAX_REDUNDANCY + 1, DevicePreference::Any)
             .validate()
             .is_err()
+    );
+}
+
+#[test]
+fn threshold_is_the_admission_lever() {
+    let (pool, ids) = pool();
+    let mut job = spec(2, 3, DevicePreference::Any);
+    job.threshold = Threshold::STRICT;
+    let plan = pool.plan(job, ids[0].node_id(), &ALL, NOW).unwrap();
+    // Two of three agree: enough at 2/3, not at 0.9 (needs 3 of 3).
+    let receipts: Vec<SignedReceipt> = plan
+        .assignments
+        .iter()
+        .map(|a| {
+            let id = ids.iter().find(|i| i.node_id() == a.worker).unwrap();
+            let out: &[u8] = if a.replica == 2 {
+                b"other"
+            } else {
+                &[a.shard as u8]
+            };
+            receipt(id, &plan, a.shard, out)
+        })
+        .collect();
+    let strict = tally(&plan, &receipts);
+    assert!(!strict.complete, "0.9 requires unanimity of 3");
+    let mut lenient = plan.clone();
+    lenient.spec.threshold = Threshold::TWO_THIRDS;
+    // (Re-tally the same receipts under 2/3: the job id is unchanged here
+    // because only the tally rule is being compared.)
+    let result = tally(&lenient, &receipts);
+    assert!(result.complete);
+    assert_eq!(result.dissenters.len(), 2);
+}
+
+#[test]
+fn spot_checks_add_a_hidden_replica() {
+    let (pool, ids) = pool();
+    let mut job = spec(200, 1, DevicePreference::Any);
+    job.spot_check_milli = 250;
+    let plan = pool.plan(job.clone(), ids[0].node_id(), &ALL, NOW).unwrap();
+    let checked = plan.spot_checked_shards();
+    assert!((25..=75).contains(&checked), "~25% of 200: {checked}");
+    for shard in 0..200 {
+        assert_eq!(plan.replicas(shard), job.replicas(shard));
+    }
+    // A single-replica shard is admitted on one receipt; a spot-checked one
+    // needs both copies to agree, so a lying worker is caught there.
+    let spot = (0..200u32).find(|s| plan.replicas(*s) == 2).unwrap();
+    let workers: Vec<&NodeIdentity> = plan
+        .assignments
+        .iter()
+        .filter(|a| a.shard == spot)
+        .map(|a| ids.iter().find(|i| i.node_id() == a.worker).unwrap())
+        .collect();
+    let receipts = vec![
+        receipt(workers[0], &plan, spot, b"honest"),
+        receipt(workers[1], &plan, spot, b"lie"),
+    ];
+    let result = tally(&plan, &receipts);
+    assert!(matches!(
+        result.shards[spot as usize],
+        ShardVerdict::Disputed { .. }
+    ));
+    assert!(crate::admission::undetected_fraud_bound(0.25, 10) < 0.06);
+}
+
+#[test]
+fn replicas_prefer_different_backends() {
+    let ids: Vec<NodeIdentity> = (1..=4).map(identity).collect();
+    let mut pool = ComputePool::new(network()).with_min_age(0);
+    // Two fast CUDA boxes, one ROCm box, one CPU-only box.
+    let gpus = [
+        vec![Device::parse_gpu("cuda:24576:5000").unwrap()],
+        vec![Device::parse_gpu("cuda:24576:5000").unwrap()],
+        vec![Device::parse_gpu("rocm:24576:2500").unwrap()],
+        vec![],
+    ];
+    for (id, gpu) in ids.iter().zip(gpus) {
+        pool.upsert(advert(id, 1, gpu, FormFactor::Server), None, false, NOW)
+            .unwrap();
+    }
+    let mut job = spec(60, 2, DevicePreference::GpuOnly);
+    let diverse = pool.plan(job.clone(), ids[0].node_id(), &ALL, NOW).unwrap();
+    job.diverse_replicas = false;
+    let plain = pool.plan(job, ids[0].node_id(), &ALL, NOW).unwrap();
+    assert!(
+        diverse.mean_backend_diversity() > plain.mean_backend_diversity(),
+        "{} vs {}",
+        diverse.mean_backend_diversity(),
+        plain.mean_backend_diversity()
+    );
+}
+
+#[test]
+fn locality_doctrine_restricts_tight_and_pipeline_work() {
+    let (pool, ids) = pool();
+    let me = ids[1].node_id();
+    let mut job = spec(10, 1, DevicePreference::Any);
+    job.sync_class = SyncClass::Tight;
+    let tight = pool.plan(job.clone(), me, &ALL, NOW).unwrap();
+    assert!(tight.assignments.iter().all(|a| a.worker == me));
+    job.sync_class = SyncClass::Pipeline;
+    let near = ids[2].node_id();
+    let rtt = move |n: &NodeId| (*n == near).then_some(12.0);
+    let context = PlanContext {
+        trust: &trust_all,
+        rtt_ms: &rtt,
+    };
+    let pipeline = pool.plan(job, me, &context, NOW).unwrap();
+    assert!(
+        pipeline
+            .assignments
+            .iter()
+            .all(|a| a.worker == me || a.worker == near)
+    );
+    assert!(pipeline.assignments.iter().any(|a| a.worker == near));
+}
+
+#[test]
+fn new_nodes_ramp_up_before_they_count() {
+    let ids: Vec<NodeIdentity> = (1..=2).map(identity).collect();
+    let mut pool = ComputePool::new(network()).with_local(ids[0].node_id());
+    for id in &ids {
+        pool.upsert(advert(id, 1, vec![], FormFactor::Server), None, false, NOW)
+            .unwrap();
+    }
+    let job = spec(20, 1, DevicePreference::Any);
+    let fresh = pool.plan(job.clone(), ids[0].node_id(), &ALL, NOW).unwrap();
+    assert!(
+        fresh
+            .assignments
+            .iter()
+            .all(|a| a.worker == ids[0].node_id()),
+        "a just-seen peer has no weight yet; the local node is exempt"
+    );
+    // Fresh adverts later keep each node's first-seen time.
+    let later = NOW + DEFAULT_MIN_AGE_MS / 2;
+    for id in &ids {
+        let mut a = advert(id, 2, vec![], FormFactor::Server).advert;
+        a.issued_ms = later;
+        pool.upsert(SignedAdvert::sign(id, a).unwrap(), None, false, later)
+            .unwrap();
+    }
+    let half = pool.plan(job, ids[0].node_id(), &ALL, later).unwrap();
+    assert!(
+        half.assignments
+            .iter()
+            .any(|a| a.worker == ids[1].node_id())
     );
 }

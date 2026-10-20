@@ -12,7 +12,7 @@
 //!
 //! Callers can steer a turn with an optional `darm` object in the request,
 //! which is removed before the request reaches any concrete model:
-//! `{"darm": {"recall": true, "remember": true, "namespace": "team-a", "top_k": 5}}`.
+//! `{"darm": {"recall": true, "remember": true, "namespace": "team-a", "top_k": 5, "tier": "tiny"}}`.
 
 use crate::node::DarmNode;
 use crate::wire::Outbound;
@@ -33,12 +33,43 @@ pub const VIRTUAL_MODEL: &str = "darm";
 const TURN_BUDGET: Duration = Duration::from_secs(120);
 static TURN_SEED: AtomicU64 = AtomicU64::new(0);
 
+/// Model tier hint (Paper 3: TinyLM 0.5–3B, Mid-Scale 7–30B, Consolidator
+/// 70B+). Routing to the smallest capable tier saves compute; the hint
+/// narrows candidates by advertised parameter count when any match and is
+/// ignored otherwise, so it can never make a turn unservable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Tiny,
+    Mid,
+    Consolidator,
+}
+
+impl Tier {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "tiny" => Self::Tiny,
+            "mid" => Self::Mid,
+            "consolidator" => Self::Consolidator,
+            _ => return None,
+        })
+    }
+
+    fn contains(self, billions: f64) -> bool {
+        match self {
+            Self::Tiny => billions <= 3.5,
+            Self::Mid => billions > 3.5 && billions <= 35.0,
+            Self::Consolidator => billions > 35.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOptions {
     pub recall: bool,
     pub remember: bool,
     pub namespace: String,
     pub top_k: usize,
+    pub tier: Option<Tier>,
 }
 
 /// Remove and parse the `darm` request extension.
@@ -73,11 +104,20 @@ pub fn take_options(
             .filter(|k| *k <= 20)
             .ok_or("darm.top_k must be an integer in 0..=20")? as usize,
     };
+    let tier = match extension.get("tier") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t == "auto" => None,
+        Some(Value::String(t)) => {
+            Some(Tier::parse(t).ok_or("darm.tier must be auto|tiny|mid|consolidator")?)
+        }
+        Some(_) => return Err("darm.tier must be a string".into()),
+    };
     Ok(TurnOptions {
         recall: get_bool("recall", true)?,
         remember: get_bool("remember", remember_default)?,
         namespace,
         top_k,
+        tier,
     })
 }
 
@@ -137,7 +177,11 @@ fn contains_any_key(value: &Value, keys: &[&str]) -> bool {
 
 /// Drop candidates that cannot serve the request's modalities; prefer
 /// tool-capable and non-deprioritized ones without emptying the pool.
-fn eligible(request: &Value, candidates: Vec<VirtualModelCandidate>) -> Vec<VirtualModelCandidate> {
+fn eligible(
+    request: &Value,
+    candidates: Vec<VirtualModelCandidate>,
+    tier: Option<Tier>,
+) -> Vec<VirtualModelCandidate> {
     let needs_vision = contains_any_key(request, &["image_url", "input_image"]);
     let needs_audio = contains_any_key(request, &["input_audio", "audio_url"]);
     let needs_tools = request
@@ -153,6 +197,13 @@ fn eligible(request: &Value, candidates: Vec<VirtualModelCandidate>) -> Vec<Virt
     }
     if pool.iter().any(|c| !c.deprioritized) {
         pool.retain(|c| !c.deprioritized);
+    }
+    if let Some(tier) = tier {
+        let in_tier =
+            |c: &VirtualModelCandidate| c.parameter_count_b.is_some_and(|b| tier.contains(b));
+        if pool.iter().any(in_tier) {
+            pool.retain(in_tier);
+        }
     }
     pool
 }
@@ -397,6 +448,7 @@ where
     let candidates = eligible(
         &invocation.request,
         std::mem::take(&mut invocation.candidates),
+        prepared.options.tier,
     );
     if candidates.is_empty() {
         return (

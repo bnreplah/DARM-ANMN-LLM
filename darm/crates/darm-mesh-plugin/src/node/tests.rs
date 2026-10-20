@@ -477,12 +477,17 @@ fn separate_chains_do_not_share_sessions_or_pools() {
 #[test]
 fn cpus_and_gpus_pool_across_nodes_and_results_reach_the_ledger() {
     let gpu = darm_compute::Device::parse_gpu("cuda:24576:1280").unwrap();
+    // Ramp disabled: this test is about pooling, not new-node weighting.
+    let base = DarmConfig {
+        pool_min_age_ms: 0,
+        ..DarmConfig::default()
+    };
     let configs = [
-        DarmConfig::default(),
-        DarmConfig::default(),
+        base.clone(),
+        base.clone(),
         DarmConfig {
             gpus: vec![gpu],
-            ..DarmConfig::default()
+            ..base
         },
     ];
     let mut nodes: Vec<DarmNode> = configs
@@ -511,12 +516,24 @@ fn cpus_and_gpus_pool_across_nodes_and_results_reach_the_ledger() {
         min_memory_mb: 0,
         allow_mobile: false,
         same_kind_replicas: false,
+        threshold: darm_compute::Threshold::TWO_THIRDS,
+        spot_check_milli: 0,
+        diverse_replicas: true,
+        sync_class: darm_compute::SyncClass::Async,
         nonce: 1,
     };
     let plan = {
         let n = &nodes[0];
         let trust = |peer: &NodeId| n.compute_trust(peer);
-        n.compute.pool.plan(spec, coordinator, &trust, NOW).unwrap()
+        let rtt = |peer: &NodeId| n.rtt_to(peer);
+        let context = darm_compute::PlanContext {
+            trust: &trust,
+            rtt_ms: &rtt,
+        };
+        n.compute
+            .pool
+            .plan(spec, coordinator, &context, NOW)
+            .unwrap()
     };
     assert!(
         plan.gpu_shards > 0 && plan.cpu_shards > 0,

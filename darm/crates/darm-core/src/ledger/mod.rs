@@ -26,4 +26,4 @@ pub use entry::{
     attestation_message, block_proposal_message,
 };
 pub use state::{ComputeRecord, LedgerState, ProposalOutcome, ProposalState, Registration};
-pub use validators::{ChainConfig, ValidatorSet};
+pub use validators::{ChainConfig, SecurityPhase, ValidatorSet};

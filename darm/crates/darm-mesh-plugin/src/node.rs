@@ -137,7 +137,7 @@ impl DarmNode {
         memory: MemoryStore,
         now_ms: u64,
     ) -> Result<Self> {
-        let compute = ComputeState::new(&config, network_id(&config, &ledger));
+        let compute = ComputeState::new(&config, network_id(&config, &ledger), identity.node_id());
         let sessions = Sessions::new(config.sessions, compute.hints())?;
         let role = if ledger.is_validator(&identity.node_id()) {
             Role::Guard
@@ -285,16 +285,33 @@ impl DarmNode {
 
     /// How much to trust a node with compute work. Unlike prompt injection
     /// (where unknown authors get zero), unknown workers may compute, since
-    /// replicated majority voting checks them, but at reduced weight scaled
-    /// by ledger reputation, and lower still on a public mesh.
+    /// replicated, thresholded agreement checks them, but at reduced weight
+    /// scaled by ledger reputation. The ceiling follows the bootstrap phase
+    /// (Volume 1.1 §3.1): while the validator set is a small federated
+    /// genesis, unsponsored nodes can barely influence placement; it rises
+    /// as the network graduates. Public meshes stay lower still.
     pub fn compute_trust(&self, node: &NodeId) -> f64 {
         let explicit = f64::from(self.trust(node));
         if explicit > 0.0 {
             return explicit;
         }
         let reputation = self.ledger.state().reputation(node) as f64 / 2_000.0;
-        let ceiling = if self.public_mesh { 0.2 } else { 0.5 };
+        let phase_ceiling: f64 = match self.ledger.config().validators.security_phase() {
+            darm_core::ledger::SecurityPhase::FederatedGenesis => 0.1,
+            darm_core::ledger::SecurityPhase::GraduatedOnboarding => 0.3,
+            darm_core::ledger::SecurityPhase::PermissionlessBft => 0.5,
+        };
+        let ceiling = if self.public_mesh {
+            phase_ceiling.min(0.2)
+        } else {
+            phase_ceiling
+        };
         reputation.clamp(0.0, ceiling)
+    }
+
+    /// Measured RTT to a DARM node over its session, if any.
+    pub fn rtt_to(&self, node: &NodeId) -> Option<f64> {
+        self.sessions.rtt_to(node)
     }
 
     // ----- memory -------------------------------------------------------
@@ -1033,6 +1050,8 @@ impl DarmNode {
                 "round": self.round,
                 "validators": validators.members().map(|(n, w)| json!({"node": n, "weight": w})).collect::<Vec<_>>(),
                 "is_validator": ledger.is_validator(&self.node_id()),
+                "security_phase": validators.security_phase(),
+                "max_faulty_validators": validators.max_faulty(),
                 "committed_memories": ledger.state().committed_memories(),
                 "registered_nodes": ledger.state().registrations().count(),
                 "proposals": proposals,

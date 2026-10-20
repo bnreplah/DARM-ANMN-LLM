@@ -5,7 +5,7 @@
 //! explicitly trusted, nothing is gossiped on a public mesh without an
 //! explicit opt-in, and replication is never proposed automatically.
 
-use darm_compute::{ContributionPolicy, Device, FormFactor, WorkloadKind};
+use darm_compute::{ContributionPolicy, Device, FormFactor, Threshold, WorkloadKind};
 use darm_core::{DarmError, NodeId, Result};
 use std::path::PathBuf;
 
@@ -77,6 +77,13 @@ pub struct DarmConfig {
     /// Start in a metered-network state (phones on cellular).
     pub metered: bool,
     pub sessions: SessionMode,
+    /// New-node weight ramp for the compute pool (Volume 1 §11 VoteWeight).
+    pub pool_min_age_ms: u64,
+    /// Default CDCP admission threshold τ_c for compute results.
+    pub admission_threshold: Threshold,
+    /// Assumed per-validator miss rate for *modeled* admission estimates
+    /// (Paper 1: 0.01 conservative, 5e-4 optimistic). Not a measurement.
+    pub assumed_p_node: f64,
 }
 
 impl Default for DarmConfig {
@@ -103,6 +110,9 @@ impl Default for DarmConfig {
             policy: ContributionPolicy::for_form_factor(FormFactor::Server),
             metered: false,
             sessions: SessionMode::Preferred,
+            pool_min_age_ms: darm_compute::pool::DEFAULT_MIN_AGE_MS,
+            admission_threshold: Threshold::TWO_THIRDS,
+            assumed_p_node: 0.01,
         }
     }
 }
@@ -150,6 +160,33 @@ fn parse_list<T>(name: &str, parse: impl Fn(&str) -> Option<T>) -> Result<Option
         })
         .collect::<Result<Vec<T>>>()
         .map(Some)
+}
+
+/// Parse an admission threshold: a fraction (`2/3`, `4/5`) or a decimal
+/// (`0.8`, rounded to a thousandth). Must exceed one half.
+pub fn parse_threshold(value: &str) -> Result<Threshold> {
+    let value = value.trim();
+    let threshold = if let Some((num, den)) = value.split_once('/') {
+        let num = num.trim().parse::<u16>().ok();
+        let den = den.trim().parse::<u16>().ok();
+        match (num, den) {
+            (Some(num), Some(den)) => Threshold { num, den },
+            _ => return Err(DarmError::Rejected(format!("bad threshold {value:?}"))),
+        }
+    } else {
+        let decimal: f64 = value
+            .parse()
+            .map_err(|_| DarmError::Rejected(format!("bad threshold {value:?}")))?;
+        if !(0.0..=1.0).contains(&decimal) {
+            return Err(DarmError::Rejected(format!("bad threshold {value:?}")));
+        }
+        Threshold {
+            num: (decimal * 1_000.0).round() as u16,
+            den: 1_000,
+        }
+    };
+    threshold.validate()?;
+    Ok(threshold)
 }
 
 /// Contribution policy: form-factor defaults, then explicit overrides.
@@ -233,6 +270,12 @@ impl DarmConfig {
                 Ok(value) => SessionMode::parse(&value)?,
                 Err(_) => defaults.sessions,
             },
+            pool_min_age_ms: number("DARM_POOL_MIN_AGE_MS", defaults.pool_min_age_ms),
+            admission_threshold: match std::env::var("DARM_ADMISSION_THRESHOLD") {
+                Ok(value) => parse_threshold(&value)?,
+                Err(_) => defaults.admission_threshold,
+            },
+            assumed_p_node: number("DARM_ASSUMED_P_NODE", defaults.assumed_p_node).clamp(1e-9, 0.5),
         })
     }
 }
@@ -261,6 +304,22 @@ pub fn validate_archive_url(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thresholds_parse_and_must_exceed_half() {
+        assert_eq!(parse_threshold("2/3").unwrap(), Threshold::TWO_THIRDS);
+        assert_eq!(
+            parse_threshold("0.8").unwrap(),
+            Threshold {
+                num: 800,
+                den: 1_000
+            }
+        );
+        assert!(parse_threshold("1/2").is_err());
+        assert!(parse_threshold("0.4").is_err());
+        assert!(parse_threshold("3/0").is_err());
+        assert!(parse_threshold("lots").is_err());
+    }
 
     #[test]
     fn session_modes_parse_strictly() {

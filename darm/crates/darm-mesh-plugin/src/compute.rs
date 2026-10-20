@@ -33,7 +33,7 @@ pub struct ComputeState {
 }
 
 impl ComputeState {
-    pub fn new(config: &DarmConfig, network: Hash32) -> Self {
+    pub fn new(config: &DarmConfig, network: Hash32, local: darm_core::NodeId) -> Self {
         let conditions = Conditions {
             metered: config.metered,
             on_battery: false,
@@ -47,7 +47,9 @@ impl ComputeState {
                 config.workloads.clone(),
             ),
             conditions,
-            pool: ComputePool::new(network),
+            pool: ComputePool::new(network)
+                .with_min_age(config.pool_min_age_ms)
+                .with_local(local),
             sizer: ShardSizer::default(),
             mesh_peer: None,
             mesh_binding: None,

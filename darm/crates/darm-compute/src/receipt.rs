@@ -7,8 +7,11 @@
 //!   was not assigned, or over a different input are discarded (so an
 //!   outsider cannot vote on results);
 //! - one receipt per (shard, worker) counts;
-//! - an output is accepted when a strict majority of the *assigned* replicas
-//!   agree on it. Workers who signed a different output are dissenters, and
+//! - an output is accepted when at least `⌈τ_c·n⌉` of the shard's `n`
+//!   *assigned* replicas agree on it (τ_c > 1/2, default 2/3; the job's
+//!   threshold is the CDCP admission threshold of Paper 1, applied to
+//!   results). Anything short of quorum is an abstention — `disputed` or
+//!   `missing` — never a guess (the ESE "third outcome", Paper 2 §5). Workers who signed a different output are dissenters, and
 //!   their receipt ids are evidence validators can cite in a reputation
 //!   report.
 //!
@@ -16,7 +19,8 @@
 //! body: proof that useful work was done and cross-checked, recorded on the
 //! same quorum-finalized chain as memories.
 //!
-//! Majority voting assumes replicas are independent. The planner places them
+//! CDCP-style agreement is consensus, not truth (Volume 1 §45): it assumes
+//! replicas fail independently. The planner places them
 //! on distinct nodes; it cannot tell whether distinct nodes share an owner,
 //! so high-value jobs should also restrict `trust` to known operators.
 
@@ -151,7 +155,6 @@ pub fn tally(plan: &JobPlan, receipts: &[SignedReceipt]) -> Tally {
             .entry((r.shard, r.worker))
             .or_insert_with(|| signed.clone());
     }
-    let replicas = usize::from(plan.spec.redundancy);
     let mut verdicts = Vec::with_capacity(shards);
     let mut dissenters = Vec::new();
     let mut outputs = Vec::with_capacity(shards);
@@ -163,9 +166,10 @@ pub fn tally(plan: &JobPlan, receipts: &[SignedReceipt]) -> Tally {
             votes.entry(signed.receipt.output).or_default().push(signed);
         }
         let received: usize = votes.values().map(Vec::len).sum();
+        let quorum = plan.spec.threshold.quorum(plan.replicas(shard)).max(1) as usize;
         let winner = votes
             .iter()
-            .find(|(_, v)| v.len() * 2 > replicas)
+            .find(|(_, v)| v.len() >= quorum)
             .map(|(output, v)| (*output, v.len()));
         match winner {
             Some((output, count)) => {

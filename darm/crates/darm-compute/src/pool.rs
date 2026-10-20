@@ -18,6 +18,7 @@
 //! CPU and GPU slots in proportion to their weights and interleaved rather
 //! than front-loaded. Replicas of one shard always land on distinct nodes.
 
+use crate::admission::Threshold;
 use crate::advert::SignedAdvert;
 use crate::device::{Backend, DeviceKind, FormFactor, Thermal, WorkloadKind};
 use darm_core::canonical::Canonical;
@@ -35,6 +36,16 @@ pub const MAX_REDUNDANCY: u8 = 7;
 const MAX_SLOTS: usize = 256;
 const PROBATION: f64 = 0.75;
 const MIN_SAMPLES: u32 = 3;
+/// Volume 1 §11 ramps a new node's vote weight over `t_min_age` (60 s in
+/// the paper). Volume 1.1 §3 notes 60 s is sized for a large, mature
+/// network, not a bootstrapping one, so the pool defaults to ten minutes.
+pub const DEFAULT_MIN_AGE_MS: u64 = 10 * 60 * 1_000;
+/// Weight multiplier for a replica candidate that shares a backend with a
+/// replica already placed on the same shard (correlated-failure reduction,
+/// Paper 2 / Volume 1.1 §3: diversity lowers ρ).
+const SAME_BACKEND_PENALTY: f64 = 0.25;
+/// Locality Doctrine (v7.2 §4.5): `pipeline` work needs RTT ≤ 30 ms.
+pub const PIPELINE_MAX_RTT_MS: f64 = 30.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +81,51 @@ impl DevicePreference {
     }
 }
 
+/// Locality Doctrine (v7.2 §4.5): how tightly a job's workers must be
+/// coupled. Inference and memory work is WAN-tolerant; training is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncClass {
+    /// Inference, memory queries, post-training work: anywhere.
+    #[default]
+    Async,
+    /// Block-local training objectives: WAN-tolerant, independently verified.
+    Block,
+    /// Pipeline-parallel: regional, RTT ≤ 30 ms.
+    Pipeline,
+    /// Tensor-parallel / full-model training: this node only.
+    Tight,
+}
+
+impl SyncClass {
+    fn code(self) -> u8 {
+        match self {
+            Self::Async => 0,
+            Self::Block => 1,
+            Self::Pipeline => 2,
+            Self::Tight => 3,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "async" => Self::Async,
+            "block" => Self::Block,
+            "pipeline" => Self::Pipeline,
+            "tight" => Self::Tight,
+            _ => return None,
+        })
+    }
+}
+
+/// What the planner needs to know beyond the pool itself.
+pub struct PlanContext<'a> {
+    /// Trust in `[0, 1]` per worker; 0 excludes it.
+    pub trust: &'a dyn Fn(&NodeId) -> f64,
+    /// Measured round-trip time to a worker, if known.
+    pub rtt_ms: &'a dyn Fn(&NodeId) -> Option<f64>,
+}
+
 /// What a coordinator wants computed. Each shard is identified by the hash
 /// of its input, so workers sign over exactly what they were given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,8 +145,26 @@ pub struct JobSpec {
     /// outputs are floating point and CPU and GPU kernels round differently.
     #[serde(default)]
     pub same_kind_replicas: bool,
+    /// Admission threshold τ_c over each shard's replicas. Under correlated
+    /// validators this is a stronger safety lever than adding replicas
+    /// (Paper 2 H1), so it is a first-class job parameter.
+    #[serde(default)]
+    pub threshold: Threshold,
+    /// Probability (per mille) that a shard gets one extra, silently
+    /// placed replica (v7.2 §4.3 tier 1, bounds P66/P67).
+    #[serde(default)]
+    pub spot_check_milli: u16,
+    /// Prefer replicas on different backends (lower correlation).
+    #[serde(default = "default_true")]
+    pub diverse_replicas: bool,
+    #[serde(default)]
+    pub sync_class: SyncClass,
     #[serde(default)]
     pub nonce: u64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl JobSpec {
@@ -102,7 +176,35 @@ impl JobSpec {
         if !(1..=MAX_REDUNDANCY).contains(&self.redundancy) {
             return Err(DarmError::malformed("job", "redundancy must be 1..=7"));
         }
-        Ok(())
+        if self.spot_check_milli > 1_000 {
+            return Err(DarmError::malformed(
+                "job",
+                "spot_check_milli must be 0..=1000",
+            ));
+        }
+        self.threshold.validate()
+    }
+
+    /// Whether `shard` carries a spot-check replica: a keyed hash of the
+    /// job's inputs and nonce, so workers cannot predict it from their own
+    /// shard alone.
+    pub fn spot_checked(&self, shard: u32) -> bool {
+        if self.spot_check_milli == 0 {
+            return false;
+        }
+        let mut encoder = Canonical::new("compute-spot-check");
+        encoder
+            .fixed32(self.input_root().as_bytes())
+            .u64(self.nonce)
+            .u32(shard);
+        let digest = Hash32::digest("compute-spot-check", encoder.as_bytes());
+        let roll = u16::from_be_bytes([digest.0[0], digest.0[1]]) % 1_000;
+        roll < self.spot_check_milli
+    }
+
+    /// Replicas planned for `shard`.
+    pub fn replicas(&self, shard: u32) -> u32 {
+        u32::from(self.redundancy) + u32::from(self.spot_checked(shard))
     }
 
     pub fn input_root(&self) -> Hash32 {
@@ -124,6 +226,11 @@ impl JobSpec {
             .u32(self.min_memory_mb)
             .bool(self.allow_mobile)
             .bool(self.same_kind_replicas)
+            .u16(self.threshold.num)
+            .u16(self.threshold.den)
+            .u16(self.spot_check_milli)
+            .bool(self.diverse_replicas)
+            .u8(self.sync_class.code())
             .u64(self.nonce);
         Hash32::digest("compute-job", encoder.as_bytes())
     }
@@ -156,6 +263,36 @@ impl JobPlan {
             .iter()
             .any(|a| a.shard == shard && a.worker == *worker)
     }
+
+    /// Replicas actually placed on `shard` (spot checks included).
+    pub fn replicas(&self, shard: u32) -> u32 {
+        self.assignments.iter().filter(|a| a.shard == shard).count() as u32
+    }
+
+    /// Shards that carry a spot-check replica.
+    pub fn spot_checked_shards(&self) -> u32 {
+        (0..self.spec.inputs.len() as u32)
+            .filter(|s| self.replicas(*s) > u32::from(self.spec.redundancy))
+            .count() as u32
+    }
+
+    /// Distinct backends per shard, averaged: a coarse, observable proxy for
+    /// how diverse (and so how weakly correlated) the replicas are.
+    pub fn mean_backend_diversity(&self) -> f64 {
+        let shards = self.spec.inputs.len().max(1);
+        let total: usize = (0..self.spec.inputs.len() as u32)
+            .map(|shard| {
+                let mut seen: Vec<Backend> = Vec::new();
+                for a in self.assignments.iter().filter(|a| a.shard == shard) {
+                    if !seen.contains(&a.backend) {
+                        seen.push(a.backend);
+                    }
+                }
+                seen.len()
+            })
+            .sum();
+        total as f64 / shards as f64
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,6 +305,7 @@ struct Efficiency {
 #[derive(Debug, Clone)]
 struct Member {
     advert: SignedAdvert,
+    first_seen_ms: u64,
     peer_verified: bool,
     efficiency: HashMap<DeviceKind, Efficiency>,
     successes: u32,
@@ -223,6 +361,8 @@ pub struct ComputePool {
     members: BTreeMap<NodeId, Member>,
     by_peer: HashMap<String, NodeId>,
     max_members: usize,
+    min_age_ms: u64,
+    local: Option<NodeId>,
 }
 
 struct Slot {
@@ -244,7 +384,29 @@ impl ComputePool {
             members: BTreeMap::new(),
             by_peer: HashMap::new(),
             max_members: max_members.max(1),
+            min_age_ms: DEFAULT_MIN_AGE_MS,
+            local: None,
         }
+    }
+
+    /// Weight ramp for newly seen nodes (0 disables it).
+    pub fn with_min_age(mut self, min_age_ms: u64) -> Self {
+        self.min_age_ms = min_age_ms;
+        self
+    }
+
+    /// The local node is exempt from the new-node ramp.
+    pub fn with_local(mut self, node: NodeId) -> Self {
+        self.local = Some(node);
+        self
+    }
+
+    /// `VoteWeight(t) = min(1, (t − t0)/t_min_age)` (Volume 1 §11).
+    fn age_weight(&self, node: &NodeId, member: &Member, now_ms: u64) -> f64 {
+        if self.min_age_ms == 0 || self.local == Some(*node) {
+            return 1.0;
+        }
+        (now_ms.saturating_sub(member.first_seen_ms) as f64 / self.min_age_ms as f64).min(1.0)
     }
 
     pub fn len(&self) -> usize {
@@ -302,6 +464,7 @@ impl ComputePool {
         };
         let member = self.members.entry(node).or_insert_with(|| Member {
             advert: signed.clone(),
+            first_seen_ms: now_ms,
             peer_verified: false,
             efficiency: HashMap::new(),
             successes: 0,
@@ -391,7 +554,13 @@ impl ComputePool {
         }
     }
 
-    fn slots(&self, spec: &JobSpec, trust: &dyn Fn(&NodeId) -> f64, now_ms: u64) -> Vec<Slot> {
+    fn slots(
+        &self,
+        spec: &JobSpec,
+        coordinator: &NodeId,
+        context: &PlanContext<'_>,
+        now_ms: u64,
+    ) -> Vec<Slot> {
         let means: HashMap<DeviceKind, Option<f64>> =
             [DeviceKind::Cpu, DeviceKind::Gpu, DeviceKind::Npu]
                 .into_iter()
@@ -406,8 +575,17 @@ impl ComputePool {
             {
                 continue;
             }
-            let trust = trust(node).clamp(0.0, 1.0);
-            if trust <= 0.0 {
+            let local_enough = match spec.sync_class {
+                SyncClass::Async | SyncClass::Block => true,
+                SyncClass::Tight => node == coordinator,
+                SyncClass::Pipeline => {
+                    node == coordinator
+                        || (context.rtt_ms)(node).is_some_and(|rtt| rtt <= PIPELINE_MAX_RTT_MS)
+                }
+            };
+            let trust =
+                (context.trust)(node).clamp(0.0, 1.0) * self.age_weight(node, member, now_ms);
+            if !local_enough || trust <= 0.0 {
                 continue;
             }
             let base =
@@ -448,14 +626,15 @@ impl ComputePool {
         &self,
         spec: JobSpec,
         coordinator: NodeId,
-        trust: &dyn Fn(&NodeId) -> f64,
+        context: &PlanContext<'_>,
         now_ms: u64,
     ) -> Result<JobPlan> {
         spec.validate()?;
-        let mut slots = self.slots(&spec, trust, now_ms);
+        let mut slots = self.slots(&spec, &coordinator, context, now_ms);
         let mut distinct: Vec<NodeId> = slots.iter().map(|s| s.node).collect();
         distinct.sort();
         distinct.dedup();
+        let most = u32::from(spec.redundancy) + u32::from(spec.spot_check_milli > 0);
         if distinct.len() < usize::from(spec.redundancy) {
             return Err(DarmError::Rejected(format!(
                 "need {} distinct eligible nodes, pool has {}",
@@ -463,26 +642,45 @@ impl ComputePool {
                 distinct.len()
             )));
         }
+        // Spot checks need one more distinct node; without it they are
+        // skipped for this plan rather than placed on a replica's node.
+        let spot_possible = distinct.len() as u32 >= most;
         let mut assignments = Vec::with_capacity(spec.inputs.len() * usize::from(spec.redundancy));
         let (mut cpu, mut gpu, mut npu) = (0u32, 0u32, 0u32);
         for shard in 0..spec.inputs.len() as u32 {
             let mut used: Vec<NodeId> = Vec::new();
+            let mut backends: Vec<Backend> = Vec::new();
             let mut first_kind = None;
-            for replica in 0..spec.redundancy {
+            let replicas = if spot_possible {
+                spec.replicas(shard)
+            } else {
+                u32::from(spec.redundancy)
+            };
+            for replica in 0..replicas {
                 let eligible = |s: &Slot| {
                     !used.contains(&s.node)
                         && (!spec.same_kind_replicas || first_kind.is_none_or(|k| k == s.kind))
                 };
-                let total: f64 = slots.iter().filter(|s| eligible(s)).map(|s| s.weight).sum();
+                let adjusted = |s: &Slot| {
+                    if spec.diverse_replicas && backends.contains(&s.backend) {
+                        s.weight * SAME_BACKEND_PENALTY
+                    } else {
+                        s.weight
+                    }
+                };
+                let total: f64 = slots.iter().filter(|s| eligible(s)).map(adjusted).sum();
                 if total <= 0.0 {
                     return Err(DarmError::Rejected(format!(
                         "no eligible worker for shard {shard} replica {replica}"
                     )));
                 }
                 // Smooth weighted round robin: every eligible slot gains its
-                // weight, the highest wins and pays back the total.
-                for slot in slots.iter_mut().filter(|s| eligible(s)) {
-                    slot.current += slot.weight;
+                // (diversity-adjusted) weight; the highest wins and pays
+                // back the total.
+                for slot in slots.iter_mut() {
+                    if eligible(slot) {
+                        slot.current += adjusted(slot);
+                    }
                 }
                 let best = slots
                     .iter()
@@ -494,6 +692,7 @@ impl ComputePool {
                 slots[best].current -= total;
                 let slot = &slots[best];
                 used.push(slot.node);
+                backends.push(slot.backend);
                 first_kind.get_or_insert(slot.kind);
                 match slot.kind {
                     DeviceKind::Cpu => cpu += 1,
@@ -502,7 +701,7 @@ impl ComputePool {
                 }
                 assignments.push(Assignment {
                     shard,
-                    replica,
+                    replica: u8::try_from(replica).unwrap_or(u8::MAX),
                     worker: slot.node,
                     device: slot.kind,
                     backend: slot.backend,

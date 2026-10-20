@@ -11,9 +11,10 @@
 //!   result to the ledger.
 
 use crate::{SharedNode, send_outbound};
+use darm_compute::admission::{ModeledAdmission, undetected_fraud_bound};
 use darm_compute::{
-    Backend, Conditions, DeviceKind, DevicePreference, JobSpec, SignedReceipt, Thermal,
-    WorkReceipt, WorkloadKind, tally,
+    Backend, Conditions, DeviceKind, DevicePreference, JobSpec, PlanContext, SignedReceipt,
+    SyncClass, Thermal, WorkReceipt, WorkloadKind, tally,
 };
 use darm_core::Hash32;
 use darm_core::time::now_ms;
@@ -67,6 +68,20 @@ pub struct PlanArgs {
     pub allow_mobile: bool,
     #[serde(default)]
     pub same_kind_replicas: bool,
+    /// Admission threshold τ_c, e.g. "2/3" (default from config), "4/5"
+    /// (high-risk), "0.9". Under correlated workers, raising this is a
+    /// stronger safety lever than adding replicas (Paper 2).
+    #[serde(default)]
+    pub threshold: Option<String>,
+    /// Probability 0..=1 that a shard gets a hidden extra replica.
+    #[serde(default)]
+    pub spot_check: Option<f32>,
+    /// Prefer replicas on different backends (default true).
+    #[serde(default)]
+    pub diverse_replicas: Option<bool>,
+    /// async | block | pipeline | tight (Locality Doctrine, default async).
+    #[serde(default)]
+    pub sync_class: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -110,6 +125,112 @@ pub fn manifest_entries() -> Vec<ManifestEntry> {
         operation::<ReceiptArgs>("darm_compute_receipt", RECEIPT_DESC).into(),
         operation::<TallyArgs>("darm_compute_tally", TALLY_DESC).into(),
     ]
+}
+
+/// Plan a job across the pool and describe its modeled guarantees.
+fn plan_job(node: &mut crate::node::DarmNode, args: PlanArgs) -> Result<Value, PluginError> {
+    let workload = WorkloadKind::parse(&args.workload).ok_or_else(|| bad("unknown workload"))?;
+    if args.inputs.is_empty() || args.inputs.len() > darm_compute::pool::MAX_PLAN_SHARDS {
+        return Err(bad("inputs must hold 1..=4096 hashes"));
+    }
+    let inputs = args
+        .inputs
+        .iter()
+        .map(|i| hash(i))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|e| PluginError::internal(e.to_string()))?;
+    let spot_check_milli = match args.spot_check {
+        Some(q) if (0.0..=1.0).contains(&q) => (q * 1_000.0).round() as u16,
+        Some(_) => return Err(bad("spot_check must be 0..=1")),
+        None => 0,
+    };
+    let sync_class = match args.sync_class.as_deref() {
+        Some(value) => SyncClass::parse(value).ok_or_else(|| bad("unknown sync_class"))?,
+        None => SyncClass::Async,
+    };
+    let threshold = match args.threshold.as_deref() {
+        Some(value) => crate::config::parse_threshold(value).map_err(bad)?,
+        None => node.config.admission_threshold,
+    };
+    let spec = JobSpec {
+        workload,
+        device: parse_preference(args.device.as_deref())?,
+        inputs,
+        redundancy: args.redundancy.unwrap_or(3),
+        min_memory_mb: args.min_memory_mb.unwrap_or(0),
+        allow_mobile: args.allow_mobile,
+        same_kind_replicas: args.same_kind_replicas,
+        threshold,
+        spot_check_milli,
+        diverse_replicas: args.diverse_replicas.unwrap_or(true),
+        sync_class,
+        nonce: u64::from_be_bytes(nonce),
+    };
+    let me = node.node_id();
+    let trust = |peer: &darm_core::NodeId| node.compute_trust(peer);
+    let rtt = |peer: &darm_core::NodeId| node.rtt_to(peer);
+    let context = PlanContext {
+        trust: &trust,
+        rtt_ms: &rtt,
+    };
+    let plan = node
+        .compute
+        .pool
+        .plan(spec, me, &context, now_ms())
+        .map_err(bad)?;
+    let units: Vec<Value> = plan
+        .assignments
+        .iter()
+        .map(|a| {
+            json!({
+                "shard": a.shard,
+                "replica": a.replica,
+                "worker": a.worker,
+                "mesh_peer": a.mesh_peer,
+                "device": a.device,
+                "backend": a.backend,
+                "suggested_units": node.compute.sizer.next_units(&a.worker, a.device),
+            })
+        })
+        .collect();
+    let redundancy = u32::from(plan.spec.redundancy);
+    let spot_checked = plan.spot_checked_shards();
+    let single = (0..plan.spec.inputs.len() as u32)
+        .filter(|s| plan.replicas(*s) == 1)
+        .count() as u32;
+    let response = json!({
+        "job": plan.job,
+        "input_root": plan.spec.input_root(),
+        "cpu_shards": plan.cpu_shards,
+        "gpu_shards": plan.gpu_shards,
+        "npu_shards": plan.npu_shards,
+        "threshold": plan.spec.threshold,
+        "sync_class": plan.spec.sync_class,
+        "spot_checked_shards": spot_checked,
+        "mean_backend_diversity": plan.mean_backend_diversity(),
+        "security_phase": node.ledger().config().validators.security_phase(),
+        "guarantees": {
+            "note": "agreement is consensus-validated, not ground truth (Volume 1 §45)",
+            "per_shard": ModeledAdmission::new(
+                redundancy,
+                plan.spec.threshold,
+                node.config.assumed_p_node,
+            ),
+            "p67_undetected_fraud_bound": (single > 0 && spot_checked > 0).then(|| json!({
+                "label": "modeled: (1-q)^k for k single-replica fraudulent shards",
+                "q": f64::from(plan.spec.spot_check_milli) / 1_000.0,
+                "k": single,
+                "bound": undetected_fraud_bound(
+                    f64::from(plan.spec.spot_check_milli) / 1_000.0,
+                    single,
+                ),
+            })),
+        },
+        "assignments": units,
+    });
+    node.compute.remember_plan(plan);
+    Ok(response)
 }
 
 fn bad(error: impl std::fmt::Display) -> PluginError {
@@ -217,62 +338,8 @@ pub fn register(router: &mut OperationRouter, node: &SharedNode) {
         move |args: PlanArgs, _context| {
             let n = Arc::clone(&n);
             Box::pin(async move {
-                let workload =
-                    WorkloadKind::parse(&args.workload).ok_or_else(|| bad("unknown workload"))?;
-                if args.inputs.is_empty() || args.inputs.len() > darm_compute::pool::MAX_PLAN_SHARDS
-                {
-                    return Err(bad("inputs must hold 1..=4096 hashes"));
-                }
-                let inputs = args
-                    .inputs
-                    .iter()
-                    .map(|i| hash(i))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut nonce = [0u8; 8];
-                getrandom::fill(&mut nonce).map_err(|e| PluginError::internal(e.to_string()))?;
-                let spec = JobSpec {
-                    workload,
-                    device: parse_preference(args.device.as_deref())?,
-                    inputs,
-                    redundancy: args.redundancy.unwrap_or(3),
-                    min_memory_mb: args.min_memory_mb.unwrap_or(0),
-                    allow_mobile: args.allow_mobile,
-                    same_kind_replicas: args.same_kind_replicas,
-                    nonce: u64::from_be_bytes(nonce),
-                };
                 let mut node = n.lock().expect("darm node lock");
-                let me = node.node_id();
-                let trust = |peer: &darm_core::NodeId| node.compute_trust(peer);
-                let plan = node
-                    .compute
-                    .pool
-                    .plan(spec, me, &trust, now_ms())
-                    .map_err(bad)?;
-                let units: Vec<Value> = plan
-                    .assignments
-                    .iter()
-                    .map(|a| {
-                        json!({
-                            "shard": a.shard,
-                            "replica": a.replica,
-                            "worker": a.worker,
-                            "mesh_peer": a.mesh_peer,
-                            "device": a.device,
-                            "backend": a.backend,
-                            "suggested_units": node.compute.sizer.next_units(&a.worker, a.device),
-                        })
-                    })
-                    .collect();
-                let response = json!({
-                    "job": plan.job,
-                    "input_root": plan.spec.input_root(),
-                    "cpu_shards": plan.cpu_shards,
-                    "gpu_shards": plan.gpu_shards,
-                    "npu_shards": plan.npu_shards,
-                    "assignments": units,
-                });
-                node.compute.remember_plan(plan);
-                Ok(response)
+                plan_job(&mut node, args)
             })
         },
     );
