@@ -2,8 +2,10 @@
 //! field and lifecycle. Pure state machine: every method takes `now_ms` and
 //! returns the gossip it wants sent, so it can be tested without a mesh.
 
-use crate::config::DarmConfig;
-use crate::wire::{MAX_BLOCKS_PER_SYNC, Outbound, Wire};
+use crate::compute::ComputeState;
+use crate::config::{DarmConfig, SessionMode};
+use crate::sessions::Sessions;
+use crate::wire::{MAX_BLOCKS_PER_SYNC, MAX_MEMORIES_PER_PUSH, Outbound, Wire};
 use darm_core::ledger::{
     ChainConfig, EntryBody, Ledger, ProposalOutcome, SignedEntry, ValidatorSet, store::BlockLog,
 };
@@ -28,7 +30,16 @@ const REPLICATION_VOTING_MS: u64 = 60 * 60 * 1_000;
 /// Per-peer token bucket for inbound gossip.
 const BUCKET_CAPACITY: f64 = 200.0;
 const BUCKET_REFILL_PER_SEC: f64 = 50.0;
+/// Node-wide bucket. Source peer ids are unauthenticated, so per-peer
+/// buckets alone can be sidestepped by rotating claimed ids.
+const GLOBAL_BUCKET_CAPACITY: f64 = 2_000.0;
+const GLOBAL_BUCKET_REFILL_PER_SEC: f64 = 500.0;
 const MAX_TRACKED_PEERS: usize = 4_096;
+const MAX_OUTSTANDING: usize = 4_096;
+/// Attestations that arrived before their block (gossip reorders). Bounded
+/// because they are unverified until the block is known.
+const MAX_EARLY_BLOCKS: usize = 64;
+const MAX_EARLY_PER_BLOCK: usize = 64;
 
 /// One periodic duty of [`DarmNode::tick`].
 type TickStep = fn(&mut DarmNode, u64) -> Result<Vec<Outbound>>;
@@ -52,6 +63,9 @@ pub struct Counters {
     pub gossip_rejected: u64,
     pub gossip_rate_limited: u64,
     pub memories_from_peers: u64,
+    pub plaintext_refused: u64,
+    pub sealed_received: u64,
+    pub adverts_received: u64,
     pub turns: u64,
     pub turns_failed: u64,
 }
@@ -74,6 +88,12 @@ pub struct DarmNode {
     window: Window,
     in_flight: u32,
     buckets: HashMap<String, Bucket>,
+    global_bucket: Bucket,
+    /// Peer -> when we sent it a request we expect an answer to (RTT).
+    outstanding: HashMap<String, u64>,
+    early_attestations: HashMap<Hash32, Vec<darm_core::ledger::Attestation>>,
+    pub compute: ComputeState,
+    pub sessions: Sessions,
     registration_submitted: bool,
     last_replication_ms: u64,
     replication: Vec<(Hash32, ReplicationRecommendation)>,
@@ -98,7 +118,7 @@ impl DarmNode {
             MemoryLog::new(dir.join("memory.jsonl")),
             MemoryLimits::default(),
         )?;
-        let mut node = Self::assemble(config, identity, ledger, memory, now_ms);
+        let mut node = Self::assemble(config, identity, ledger, memory, now_ms)?;
         node.persisted_height = node.ledger.height();
         node.block_log = Some(log);
         Ok(node)
@@ -107,7 +127,7 @@ impl DarmNode {
     pub fn ephemeral(config: DarmConfig, identity: NodeIdentity, now_ms: u64) -> Result<Self> {
         let ledger = Ledger::new(chain_config(&config, &identity)?);
         let memory = MemoryStore::new(MemoryLimits::default());
-        Ok(Self::assemble(config, identity, ledger, memory, now_ms))
+        Self::assemble(config, identity, ledger, memory, now_ms)
     }
 
     fn assemble(
@@ -116,13 +136,15 @@ impl DarmNode {
         ledger: Ledger,
         memory: MemoryStore,
         now_ms: u64,
-    ) -> Self {
+    ) -> Result<Self> {
+        let compute = ComputeState::new(&config, network_id(&config, &ledger), identity.node_id());
+        let sessions = Sessions::new(config.sessions, compute.hints())?;
         let role = if ledger.is_validator(&identity.node_id()) {
             Role::Guard
         } else {
             Role::Worker
         };
-        Self {
+        Ok(Self {
             config,
             identity,
             ledger,
@@ -140,12 +162,20 @@ impl DarmNode {
             window: Window::default(),
             in_flight: 0,
             buckets: HashMap::new(),
+            global_bucket: Bucket {
+                tokens: GLOBAL_BUCKET_CAPACITY,
+                updated_ms: now_ms,
+            },
+            outstanding: HashMap::new(),
+            early_attestations: HashMap::new(),
+            compute,
+            sessions,
             registration_submitted: false,
             last_replication_ms: 0,
             replication: Vec::new(),
             archived: std::collections::HashSet::new(),
             counters: Counters::default(),
-        }
+        })
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -160,8 +190,71 @@ impl DarmNode {
         &self.memory
     }
 
+    pub fn network(&self) -> Hash32 {
+        network_id(&self.config, &self.ledger)
+    }
+
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.identity
+    }
+
+    /// Secure by default: on a public mesh that allows gossip at all, every
+    /// message except a handshake must travel inside a session.
     pub fn set_public_mesh(&mut self, public: bool) {
         self.public_mesh = public;
+        if public && self.sessions.mode == SessionMode::Preferred {
+            self.sessions.mode = SessionMode::Required;
+        }
+    }
+
+    /// Compute adverts are gossiped when pooling is on and the mesh allows.
+    pub fn compute_gossip(&self) -> bool {
+        self.compute.enabled && self.mesh_allows_gossip()
+    }
+
+    /// Final step for anything leaving this node: seal for sessions.
+    pub fn finalize(&mut self, outbound: Vec<Outbound>, now_ms: u64) -> Vec<Outbound> {
+        if self.outstanding.len() < MAX_OUTSTANDING {
+            for item in &outbound {
+                if !item.target.is_empty()
+                    && matches!(
+                        item.message,
+                        Wire::MemoryRequest { .. } | Wire::SyncRequest { .. }
+                    )
+                {
+                    self.outstanding
+                        .entry(item.target.clone())
+                        .or_insert(now_ms);
+                }
+            }
+        }
+        self.sessions.transform(outbound, now_ms)
+    }
+
+    /// Commit a verified pooled-compute result to the ledger as this node
+    /// (proof of useful work). Returns the entry id and gossip.
+    pub fn commit_compute(
+        &mut self,
+        body: EntryBody,
+        now_ms: u64,
+    ) -> Result<(Hash32, Vec<Outbound>)> {
+        if !matches!(body, EntryBody::ComputeCommit { .. }) {
+            return Err(DarmError::Rejected("not a compute commit".into()));
+        }
+        let entry = self.sign_entry(body, now_ms)?;
+        let id = entry.id();
+        self.ledger.submit(entry.clone(), now_ms)?;
+        let out = if self.ledger_gossip() {
+            vec![Outbound::broadcast(Wire::LedgerEntry { entry })]
+        } else {
+            Vec::new()
+        };
+        Ok((id, out))
+    }
+
+    /// Routing multiplier for a mesh endpoint from the compute pool.
+    pub fn route_factor(&self, mesh_peer: &str, now_ms: u64) -> f64 {
+        self.compute.pool.route_factor(mesh_peer, now_ms)
     }
 
     fn mesh_allows_gossip(&self) -> bool {
@@ -188,6 +281,37 @@ impl DarmNode {
             return (0.5 + reputation / 10.0).clamp(0.0, 1.0);
         }
         0.0
+    }
+
+    /// How much to trust a node with compute work. Unlike prompt injection
+    /// (where unknown authors get zero), unknown workers may compute, since
+    /// replicated, thresholded agreement checks them, but at reduced weight
+    /// scaled by ledger reputation. The ceiling follows the bootstrap phase
+    /// (Volume 1.1 §3.1): while the validator set is a small federated
+    /// genesis, unsponsored nodes can barely influence placement; it rises
+    /// as the network graduates. Public meshes stay lower still.
+    pub fn compute_trust(&self, node: &NodeId) -> f64 {
+        let explicit = f64::from(self.trust(node));
+        if explicit > 0.0 {
+            return explicit;
+        }
+        let reputation = self.ledger.state().reputation(node) as f64 / 2_000.0;
+        let phase_ceiling: f64 = match self.ledger.config().validators.security_phase() {
+            darm_core::ledger::SecurityPhase::FederatedGenesis => 0.1,
+            darm_core::ledger::SecurityPhase::GraduatedOnboarding => 0.3,
+            darm_core::ledger::SecurityPhase::PermissionlessBft => 0.5,
+        };
+        let ceiling = if self.public_mesh {
+            phase_ceiling.min(0.2)
+        } else {
+            phase_ceiling
+        };
+        reputation.clamp(0.0, ceiling)
+    }
+
+    /// Measured RTT to a DARM node over its session, if any.
+    pub fn rtt_to(&self, node: &NodeId) -> Option<f64> {
+        self.sessions.rtt_to(node)
     }
 
     // ----- memory -------------------------------------------------------
@@ -363,6 +487,7 @@ impl DarmNode {
                 }
             }
             self.persisted_height = height;
+            self.early_attestations.clear();
             self.round = 0;
             self.proposed_at = None;
             self.last_progress_ms = block.header.timestamp_ms;
@@ -491,8 +616,12 @@ impl DarmNode {
             self.round = self.round.saturating_add(1);
             self.last_progress_ms = now_ms;
         }
+        out.append(&mut self.adaptive_tick(now_ms));
+        let tuning = self.sessions.local_tuning();
         if self.memory_gossip()
-            && now_ms.saturating_sub(self.last_announce_ms) >= ANNOUNCE_INTERVAL_MS
+            && tuning.announce
+            && now_ms.saturating_sub(self.last_announce_ms)
+                >= ANNOUNCE_INTERVAL_MS.saturating_mul(tuning.interval_factor)
         {
             self.last_announce_ms = now_ms;
             let ids = self.memory.inventory(crate::wire::MAX_IDS);
@@ -500,11 +629,63 @@ impl DarmNode {
                 out.push(Outbound::broadcast(Wire::MemoryAnnounce { ids }));
             }
         }
+        self.finalize(out, now_ms)
+    }
+
+    /// Compute adverts, pool expiry, session upkeep and request timeouts.
+    fn adaptive_tick(&mut self, now_ms: u64) -> Vec<Outbound> {
+        let mut out = Vec::new();
+        self.sessions.hints = self.compute.hints();
+        let network = self.network();
+        let slowdown = self.sessions.hints.slowdown();
+        match self
+            .compute
+            .advert_due(&self.identity, &self.config, network, slowdown, now_ms)
+        {
+            Ok(Some(advert)) if self.compute_gossip() => {
+                out.push(Outbound::broadcast(Wire::ComputeAdvert { advert }));
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(%error, "darm compute advert failed"),
+        }
+        self.compute.pool.expire(now_ms);
+        out.append(&mut self.sessions.tick(&self.identity, network, now_ms));
+        let timed_out: Vec<String> = self
+            .outstanding
+            .iter()
+            .filter(|(peer, sent)| {
+                now_ms.saturating_sub(**sent) > self.sessions.tuning(peer).request_timeout_ms
+            })
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in timed_out {
+            self.outstanding.remove(&peer);
+            self.sessions.link(&peer).on_timeout();
+        }
         out
     }
 
-    pub fn on_peer_up(&mut self, peer: &str) -> Vec<Outbound> {
+    /// Update live device conditions (battery, charging, network, heat,
+    /// load). Re-advertises on the next tick and re-tunes the protocol.
+    pub fn set_conditions(&mut self, conditions: darm_compute::Conditions) {
+        self.compute.set_conditions(conditions);
+        self.sessions.hints = self.compute.hints();
+    }
+
+    pub fn on_peer_up(&mut self, peer: &str, now_ms: u64) -> Vec<Outbound> {
         let mut out = Vec::new();
+        self.sessions.note_peer(peer);
+        let network = self.network();
+        out.append(
+            &mut self
+                .sessions
+                .initiate(peer, &self.identity, network, now_ms),
+        );
+        if self.compute_gossip()
+            && let Some(advert) = self.compute.last_advert.clone()
+        {
+            out.push(Outbound::to(peer, Wire::ComputeAdvert { advert }));
+        }
         if self.ledger_gossip() {
             out.push(Outbound::to(
                 peer,
@@ -520,10 +701,18 @@ impl DarmNode {
                 out.push(Outbound::to(peer, Wire::MemoryAnnounce { ids }));
             }
         }
-        out
+        self.finalize(out, now_ms)
     }
 
     fn admit(&mut self, source: &str, now_ms: u64) -> bool {
+        let global = &mut self.global_bucket;
+        let elapsed = now_ms.saturating_sub(global.updated_ms) as f64 / 1_000.0;
+        global.tokens =
+            (global.tokens + elapsed * GLOBAL_BUCKET_REFILL_PER_SEC).min(GLOBAL_BUCKET_CAPACITY);
+        global.updated_ms = now_ms;
+        if global.tokens < 1.0 {
+            return false;
+        }
         if !self.buckets.contains_key(source) && self.buckets.len() >= MAX_TRACKED_PEERS {
             self.buckets
                 .retain(|_, b| now_ms.saturating_sub(b.updated_ms) < 60_000);
@@ -542,6 +731,7 @@ impl DarmNode {
             return false;
         }
         bucket.tokens -= 1.0;
+        self.global_bucket.tokens -= 1.0;
         true
     }
 
@@ -553,8 +743,31 @@ impl DarmNode {
             return Vec::new();
         }
         self.counters.gossip_received += 1;
-        match self.handle_inner(source, message, now_ms) {
-            Ok(out) => out,
+        self.sessions.note_peer(source);
+        let network = self.network();
+        let result = match message {
+            Wire::Handshake { handshake } => {
+                self.sessions
+                    .on_handshake(source, handshake, &self.identity, network, now_ms)
+            }
+            Wire::Sealed { frame } => match self.sessions.open(source, &frame, now_ms) {
+                Ok(Some((inner, proven))) => {
+                    self.counters.sealed_received += 1;
+                    self.handle_inner(source, inner, Some(proven), now_ms)
+                }
+                Ok(None) => Ok(Vec::new()),
+                Err(error) => Err(error),
+            },
+            _ if self.sessions.mode == SessionMode::Required => {
+                self.counters.plaintext_refused += 1;
+                Err(DarmError::Rejected(
+                    "plaintext gossip refused; sessions required".into(),
+                ))
+            }
+            other => self.handle_inner(source, other, None, now_ms),
+        };
+        match result {
+            Ok(out) => self.finalize(out, now_ms),
             Err(error) => {
                 self.counters.gossip_rejected += 1;
                 tracing::debug!(%error, source, "darm gossip rejected");
@@ -563,7 +776,98 @@ impl DarmNode {
         }
     }
 
-    fn handle_inner(&mut self, source: &str, message: Wire, now_ms: u64) -> Result<Vec<Outbound>> {
+    /// A peer's compute advert. Its endpoint mapping counts as proven when it
+    /// came through a session with the advertising node (or carries a valid
+    /// mesh-host binding, which the pool checks itself).
+    fn admit_advert(
+        &mut self,
+        source: &str,
+        advert: darm_compute::SignedAdvert,
+        proven: Option<NodeId>,
+        now_ms: u64,
+    ) -> Result<()> {
+        if advert.advert.node == self.node_id() {
+            return Err(DarmError::Rejected("our own advert echoed back".into()));
+        }
+        let verified = proven == Some(advert.advert.node);
+        self.compute
+            .pool
+            .upsert(advert, Some(source), verified, now_ms)?;
+        self.counters.adverts_received += 1;
+        Ok(())
+    }
+
+    /// Push the requested shareable memories in batches sized for this link.
+    fn answer_memory_request(&self, source: &str, ids: Vec<Hash32>) -> Vec<Outbound> {
+        let wanted: Vec<Hash32> = ids.into_iter().take(MAX_REQUEST_IDS).collect();
+        let batch = self
+            .sessions
+            .tuning(source)
+            .batch_items
+            .clamp(1, MAX_MEMORIES_PER_PUSH.min(MEMORIES_PER_PUSH * 2));
+        self.memory
+            .export_shareable(&wanted)
+            .chunks(batch)
+            .map(|chunk| {
+                Outbound::to(
+                    source,
+                    Wire::MemoryPush {
+                        memories: chunk.to_vec(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn buffer_attestation(&mut self, block: Hash32, attestation: darm_core::ledger::Attestation) {
+        if !self.ledger.is_validator(&attestation.validator) {
+            return;
+        }
+        if !self.early_attestations.contains_key(&block)
+            && self.early_attestations.len() >= MAX_EARLY_BLOCKS
+        {
+            return;
+        }
+        let pending = self.early_attestations.entry(block).or_default();
+        if pending.len() < MAX_EARLY_PER_BLOCK
+            && !pending.iter().any(|a| a.validator == attestation.validator)
+        {
+            pending.push(attestation);
+        }
+    }
+
+    /// The block for buffered attestations arrived: verify and apply them.
+    fn apply_early_attestations(&mut self, block: &Hash32) {
+        let Some(pending) = self.early_attestations.remove(block) else {
+            return;
+        };
+        for attestation in pending {
+            if self.ledger.candidate(block).is_none() {
+                break;
+            }
+            if let Err(error) = self.ledger.receive_attestation(block, attestation) {
+                tracing::debug!(%error, "darm buffered attestation rejected");
+            }
+        }
+    }
+
+    /// An answer to an outstanding request arrived: feed the RTT sample.
+    fn answered(&mut self, source: &str, now_ms: u64) {
+        if let Some(sent) = self.outstanding.remove(source) {
+            self.sessions
+                .link(source)
+                .on_delivery(now_ms.saturating_sub(sent) as f64);
+        }
+    }
+
+    /// `proven` is the DARM node a sealed frame came from, if any.
+    fn handle_inner(
+        &mut self,
+        source: &str,
+        message: Wire,
+        proven: Option<NodeId>,
+        now_ms: u64,
+    ) -> Result<Vec<Outbound>> {
         let memory_gossip = self.memory_gossip();
         let ledger_gossip = self.ledger_gossip();
         let mut out = Vec::new();
@@ -576,21 +880,10 @@ impl DarmNode {
                 }
             }
             Wire::MemoryRequest { ids } if memory_gossip => {
-                let wanted: Vec<Hash32> = ids.into_iter().take(MAX_REQUEST_IDS).collect();
-                for chunk in self
-                    .memory
-                    .export_shareable(&wanted)
-                    .chunks(MEMORIES_PER_PUSH)
-                {
-                    out.push(Outbound::to(
-                        source,
-                        Wire::MemoryPush {
-                            memories: chunk.to_vec(),
-                        },
-                    ));
-                }
+                out.append(&mut self.answer_memory_request(source, ids));
             }
             Wire::MemoryPush { memories } if memory_gossip => {
+                self.answered(source, now_ms);
                 for memory in memories {
                     if self.memory.insert(memory, Origin::Peer, now_ms).is_ok() {
                         self.counters.memories_from_peers += 1;
@@ -615,6 +908,7 @@ impl DarmNode {
                     return Ok(out);
                 }
                 let (hash, _) = self.ledger.receive_proposal(block, now_ms)?;
+                self.apply_early_attestations(&hash);
                 if self.ledger.is_validator(&self.node_id())
                     && self.ledger.candidate(&hash).is_some()
                     && let Ok((attestation, _)) = self.ledger.attest(&self.identity, &hash)
@@ -633,6 +927,8 @@ impl DarmNode {
                 if self.ledger.candidate(&block_hash).is_some() {
                     self.ledger.receive_attestation(&block_hash, attestation)?;
                     self.sync_effects()?;
+                } else {
+                    self.buffer_attestation(block_hash, attestation);
                 }
             }
             Wire::SyncRequest { chain, from_height } if ledger_gossip => {
@@ -652,6 +948,7 @@ impl DarmNode {
                 }
             }
             Wire::SyncBlocks { blocks } if ledger_gossip => {
+                self.answered(source, now_ms);
                 let full = blocks.len() == MAX_BLOCKS_PER_SYNC;
                 for block in blocks {
                     if block.header.height == self.ledger.height() + 1 {
@@ -669,7 +966,11 @@ impl DarmNode {
                     ));
                 }
             }
-            // Gossip of a kind this node has disabled.
+            Wire::ComputeAdvert { advert } if self.compute_gossip() => {
+                self.admit_advert(source, advert, proven, now_ms)?;
+            }
+            // Gossip of a kind this node has disabled, or session control
+            // that `handle` already dealt with.
             _ => {}
         }
         Ok(out)
@@ -749,15 +1050,31 @@ impl DarmNode {
                 "round": self.round,
                 "validators": validators.members().map(|(n, w)| json!({"node": n, "weight": w})).collect::<Vec<_>>(),
                 "is_validator": ledger.is_validator(&self.node_id()),
+                "security_phase": validators.security_phase(),
+                "max_faulty_validators": validators.max_faulty(),
                 "committed_memories": ledger.state().committed_memories(),
                 "registered_nodes": ledger.state().registrations().count(),
                 "proposals": proposals,
             },
             "memory": self.memory.stats(),
             "pheromones": routes,
+            "compute": self.compute.status(&self.config, now_ms),
+            "sessions": self.sessions.status(),
             "replication_recommendations": self.replication.iter().map(|(id, r)| json!({"proposal": id, "recommendation": r})).collect::<Vec<_>>(),
             "counters": self.counters,
         })
+    }
+}
+
+/// The network sessions and the compute pool are bound to: the chain when
+/// the operator named one (so separate DARM deployments stay separate), else
+/// one shared default network so unconfigured nodes on a mesh still pool
+/// their CPUs and GPUs (each still keeps its own private ledger).
+fn network_id(config: &DarmConfig, ledger: &Ledger) -> Hash32 {
+    if config.chain_name.is_some() {
+        ledger.chain_id()
+    } else {
+        Hash32::digest("network", b"default")
     }
 }
 
