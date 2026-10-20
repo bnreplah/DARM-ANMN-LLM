@@ -1,0 +1,28 @@
+[package]
+name = "darm-mesh-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Built-in mesh-llm plugin that turns a mesh into a DARM-ANN-LLM: the `darm` virtual model with distributed memory, pheromone routing and ledger gossip"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+darm-core = { path = "../darm-core", version = "0.1.0" }
+darm-memory = { path = "../darm-memory", version = "0.1.0" }
+darm-swarm = { path = "../darm-swarm", version = "0.1.0" }
+reqwest = { version = "0.13", features = ["json"] }
+mesh-llm-plugin = { path = "../../../mesh/crates/mesh-llm-plugin", version = "0.78.0" }
+schemars = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

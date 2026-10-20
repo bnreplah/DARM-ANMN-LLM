@@ -1,0 +1,277 @@
+// Protocol infrastructure — extracted from mesh.rs
+
+#[cfg(test)]
+use crate::mesh::ClaimedLogHead;
+#[cfg(test)]
+use crate::mesh::NodeRole;
+use crate::mesh::PeerAnnouncement;
+
+pub(crate) mod config_diagnostic;
+pub(crate) mod convert;
+pub(crate) mod node_record;
+use anyhow::Result;
+pub(crate) use convert::*;
+use iroh::endpoint::Connection;
+use iroh::{Endpoint, EndpointAddr, EndpointId};
+pub(crate) use mesh_llm_protocol::protocol::{ControlFrameError, ValidateControlFrame};
+use prost::Message;
+
+#[cfg(test)]
+mod config_tests;
+pub const ALPN_CONTROL_V1: &[u8] = b"mesh-llm-control/1";
+pub const ALPN_V1: &[u8] = b"mesh-llm/1";
+#[cfg(test)]
+pub const ALPN: &[u8] = ALPN_V1;
+pub(crate) const NODE_PROTOCOL_GENERATION: u32 = 1;
+pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+pub(crate) const STREAM_GOSSIP: u8 = 0x01;
+pub(crate) const STREAM_TUNNEL: u8 = 0x02;
+pub(crate) const STREAM_TUNNEL_MAP: u8 = 0x03;
+pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
+pub(crate) const STREAM_ROUTE_REQUEST: u8 = 0x05;
+pub(crate) const STREAM_PEER_DOWN: u8 = 0x06;
+pub(crate) const STREAM_PEER_LEAVING: u8 = 0x07;
+pub(crate) const STREAM_PLUGIN_CHANNEL: u8 = 0x08;
+pub(crate) const STREAM_PLUGIN_BULK_TRANSFER: u8 = 0x09;
+pub(crate) const STREAM_PLUGIN_MESH_STREAM: u8 = 0x0a;
+// Stream IDs 0x0b and 0x0c remain reserved for the retired mesh-plane config
+// subscription and push operations. Config and inventory control now live
+// exclusively on `mesh-llm-control/1`.
+#[cfg(test)]
+pub(crate) const STREAM_CONFIG_SUBSCRIBE: u8 = 0x0b;
+#[cfg(test)]
+pub(crate) const STREAM_CONFIG_PUSH: u8 = 0x0c;
+pub(crate) const STREAM_SUBPROTOCOL: u8 = 0x0d;
+pub(crate) const STREAM_DIRECT_PATH_REQUEST: u8 = 0x0e;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControlProtocol {
+    ProtoV1,
+}
+
+pub(crate) fn protocol_from_alpn(alpn: &[u8]) -> ControlProtocol {
+    let _ = alpn;
+    ControlProtocol::ProtoV1
+}
+
+pub(crate) fn connection_protocol(conn: &Connection) -> ControlProtocol {
+    protocol_from_alpn(conn.alpn())
+}
+
+pub(crate) async fn connect_mesh(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
+    let connecting = endpoint.connect(addr, ALPN_V1).await?;
+    Ok(connecting)
+}
+
+pub(crate) async fn write_len_prefixed(
+    send: &mut iroh::endpoint::SendStream,
+    body: &[u8],
+) -> Result<()> {
+    ensure_control_frame_size(body)?;
+    send.write_all(&(body.len() as u32).to_le_bytes()).await?;
+    send.write_all(body).await?;
+    Ok(())
+}
+
+pub(crate) fn ensure_control_frame_size(body: &[u8]) -> Result<(), ControlFrameError> {
+    if body.len() > MAX_CONTROL_FRAME_BYTES {
+        return Err(ControlFrameError::OversizeFrame { size: body.len() });
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_len_prefixed(recv: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>> {
+    read_frame(recv, MAX_CONTROL_FRAME_BYTES).await
+}
+
+/// Reads one length-prefixed frame of at most `max_len` bytes.
+///
+/// The buffer grows as the body arrives instead of being sized from the
+/// length prefix, so a peer that claims a large frame and then stalls holds
+/// only as much memory as it actually sent.
+pub(crate) async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    max_len: usize,
+) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > max_len {
+        anyhow::bail!("control frame too large: {} bytes", len);
+    }
+    let mut buf = Vec::new();
+    (&mut *reader)
+        .take(len as u64)
+        .read_to_end(&mut buf)
+        .await?;
+    if buf.len() < len {
+        anyhow::bail!("control frame ended after {} of {} bytes", buf.len(), len);
+    }
+    Ok(buf)
+}
+
+/// What this node sends in one gossip exchange: unsigned announcements for
+/// nodes that predate signed records, and the signed records themselves.
+pub(crate) struct OutboundGossip {
+    pub(crate) announcements: Vec<PeerAnnouncement>,
+    pub(crate) signed_records: Vec<crate::proto::node::SignedNodeRecord>,
+    pub(crate) signed_cache_affinity: Vec<crate::proto::node::SignedCacheAffinity>,
+}
+
+/// A decoded gossip frame before signed records are checked against the
+/// peer table.
+pub(crate) struct InboundGossip {
+    pub(crate) announcements: Vec<(EndpointAddr, PeerAnnouncement)>,
+    pub(crate) signed_records: Vec<crate::proto::node::SignedNodeRecord>,
+    pub(crate) signed_cache_affinity: Vec<crate::proto::node::SignedCacheAffinity>,
+}
+
+pub(crate) async fn write_gossip_payload(
+    send: &mut iroh::endpoint::SendStream,
+    protocol: ControlProtocol,
+    outbound: &OutboundGossip,
+    sender_id: EndpointId,
+    own_plugin_keys: &[crate::proto::node::PluginKey],
+) -> Result<()> {
+    let _ = protocol;
+    let mut frame = build_gossip_frame(&outbound.announcements, sender_id);
+    attach_own_plugin_keys(&mut frame, own_plugin_keys);
+    frame.signed_records = outbound.signed_records.clone();
+    frame.signed_cache_affinity = outbound.signed_cache_affinity.clone();
+    write_len_prefixed(send, &frame.encode_to_vec()).await?;
+    Ok(())
+}
+
+/// This node's own plugin keys go on its own entry only (the one whose
+/// `endpoint_id` is the frame's sender); relayed entries never carry any.
+pub(crate) fn attach_own_plugin_keys(
+    frame: &mut crate::proto::node::GossipFrame,
+    own_plugin_keys: &[crate::proto::node::PluginKey],
+) {
+    let sender = frame.sender_id.clone();
+    if let Some(own) = frame
+        .peers
+        .iter_mut()
+        .find(|peer| peer.endpoint_id == sender)
+    {
+        own.plugin_keys = own_plugin_keys.to_vec();
+    }
+}
+
+/// A gossip exchange's announcements, and the sender's verified plugin keys.
+pub(crate) type GossipWithPluginKeys = (
+    Vec<(EndpointAddr, PeerAnnouncement)>,
+    Vec<crate::mesh::plugin_keys::BoundPluginKey>,
+);
+
+/// [`decode_gossip_frame`], plus the plugin keys on the sender's own entry
+/// whose binding verifies against the sender's node key.
+pub(crate) fn decode_gossip_frame_and_plugin_keys(
+    protocol: ControlProtocol,
+    remote: EndpointId,
+    buf: &[u8],
+) -> Result<(InboundGossip, Vec<crate::mesh::plugin_keys::BoundPluginKey>)> {
+    let inbound = decode_gossip_frame(protocol, remote, buf)?;
+    // The frame decoded and validated above; read the sender's own entry again.
+    let frame = crate::proto::node::GossipFrame::decode(buf)
+        .map_err(|e| anyhow::anyhow!("gossip decode from {}: {e}", remote.fmt_short()))?;
+    let keys = frame
+        .peers
+        .iter()
+        .find(|peer| peer.endpoint_id.as_slice() == remote.as_bytes())
+        .map(|own| crate::mesh::plugin_keys::verified_from_proto(&remote, &own.plugin_keys))
+        .unwrap_or_default();
+    Ok((inbound, keys))
+}
+
+pub(crate) fn decode_gossip_frame(
+    protocol: ControlProtocol,
+    remote: EndpointId,
+    buf: &[u8],
+) -> Result<InboundGossip> {
+    let _ = protocol;
+    let frame = crate::proto::node::GossipFrame::decode(buf)
+        .map_err(|e| anyhow::anyhow!("gossip decode from {}: {e}", remote.fmt_short()))?;
+    frame
+        .validate_frame()
+        .map_err(|e| anyhow::anyhow!("invalid gossip frame from {}: {e}", remote.fmt_short()))?;
+    if frame.sender_id.as_slice() != remote.as_bytes() {
+        anyhow::bail!(
+            "gossip sender_id mismatch from {}: connection identity does not match frame sender_id",
+            remote.fmt_short()
+        );
+    }
+    Ok(InboundGossip {
+        announcements: frame
+            .peers
+            .iter()
+            .filter_map(proto_ann_to_local)
+            .collect::<Vec<_>>(),
+        signed_records: frame.signed_records,
+        signed_cache_affinity: frame.signed_cache_affinity,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn decode_gossip_payload(
+    protocol: ControlProtocol,
+    remote: EndpointId,
+    buf: &[u8],
+) -> Result<Vec<(EndpointAddr, PeerAnnouncement)>> {
+    decode_gossip_frame(protocol, remote, buf).map(|inbound| inbound.announcements)
+}
+
+#[cfg(test)]
+pub(crate) fn encode_control_frame(stream_type: u8, msg: &impl prost::Message) -> Vec<u8> {
+    let proto_bytes = msg.encode_to_vec();
+    let len = proto_bytes.len() as u32;
+    let mut buf = Vec::with_capacity(1 + 4 + proto_bytes.len());
+    buf.push(stream_type);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(&proto_bytes);
+    buf
+}
+
+#[cfg(test)]
+pub(crate) fn decode_control_frame<T: ValidateControlFrame>(
+    expected_stream_type: u8,
+    data: &[u8],
+) -> Result<T, ControlFrameError> {
+    const HEADER_LEN: usize = 5;
+    if data.len() < HEADER_LEN {
+        return Err(ControlFrameError::DecodeError(format!(
+            "frame too short: {} bytes (minimum {})",
+            data.len(),
+            HEADER_LEN
+        )));
+    }
+    let actual_type = data[0];
+    if actual_type != expected_stream_type {
+        return Err(ControlFrameError::WrongStreamType {
+            expected: expected_stream_type,
+            got: actual_type,
+        });
+    }
+    let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+    if len > MAX_CONTROL_FRAME_BYTES {
+        return Err(ControlFrameError::OversizeFrame { size: len });
+    }
+    let proto_bytes = data.get(5..5 + len).ok_or_else(|| {
+        ControlFrameError::DecodeError(format!(
+            "frame truncated: header says {} bytes but only {} available",
+            len,
+            data.len().saturating_sub(5)
+        ))
+    })?;
+    let msg = T::decode(proto_bytes).map_err(|e| ControlFrameError::DecodeError(e.to_string()))?;
+    msg.validate_frame()?;
+    Ok(msg)
+}
+
+#[cfg(test)]
+pub(crate) mod tests;
+
+#[cfg(feature = "payments")]
+mod payment_offers;

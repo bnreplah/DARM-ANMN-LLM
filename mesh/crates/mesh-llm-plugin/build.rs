@@ -1,0 +1,38 @@
+use std::fs;
+use std::path::Path;
+
+fn main() {
+    watch_path(Path::new("proto"));
+    compile_proto();
+}
+
+fn watch_path(path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+
+    if meta.is_dir() {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            watch_path(&entry.path());
+        }
+    }
+}
+
+fn compile_proto() {
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc");
+    // SAFETY: Cargo runs this build script in its own process before crate code
+    // starts; no application threads can observe this environment mutation.
+    unsafe { std::env::set_var("PROTOC", protoc) };
+
+    let mut config = prost_build::Config::new();
+    config.boxed(".meshllm.plugin.v1.PluginManifest.openai_exchange_hook");
+    config.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
+    config
+        .compile_protos(&["proto/plugin.proto"], &["proto"])
+        .expect("compile plugin proto");
+}

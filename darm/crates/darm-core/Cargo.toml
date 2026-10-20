@@ -1,0 +1,24 @@
+[package]
+name = "darm-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "DARM-ANN core: node identities, canonical signing, Merkle trees and the quorum-finalized distributed memory ledger"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3.workspace = true
+ed25519-dalek = { version = "=3.0.0", features = ["zeroize"] }
+getrandom = "0.3"
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"

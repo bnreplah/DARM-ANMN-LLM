@@ -1,0 +1,17 @@
+name: Main CI migration compatibility
+
+# Routine main validation is owned by the five main_<lane>.yml workflows. This
+# reusable-only shim preserves the legacy filename during the migration; it has
+# no event trigger and cannot dispatch or compose a main graph.
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  compatibility:
+    name: Split main entrypoints active
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: echo "Main validation is owned by the five main_<lane>.yml workflows."

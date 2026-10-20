@@ -1,0 +1,145 @@
+namespace mesh_ffi {
+    [Throws=FfiError]
+    MeshNodeHandle create_node(
+        string mode,
+        sequence<string> join_tokens,
+        sequence<string> models,
+        boolean auto_join,
+        string? owner_key_path,
+        u16 api_port,
+        u16 console_port
+    );
+
+    string current_mesh_version();
+    string current_skippy_abi_version();
+
+    [Throws=FfiError]
+    NativeRuntimeInstallOutcomeNative install_native_runtime(
+        NativeRuntimeInstallOptionsNative options,
+        NativeRuntimeProgressListener? progress
+    );
+    [Throws=FfiError]
+    sequence<InstalledNativeRuntimeNative> installed_native_runtimes(string? cache_dir);
+    [Throws=FfiError]
+    boolean remove_native_runtime(string? cache_dir, string mesh_version, string native_runtime_id);
+    [Throws=FfiError]
+    NativeRuntimePruneResultNative prune_native_runtimes(
+        string? cache_dir, string? active_mesh_version, NativeRuntimePruneModeNative mode
+    );
+};
+
+[Error]
+enum FfiError {
+    "BuildFailed",
+    "JoinFailed",
+    "DiscoveryFailed",
+    "StreamFailed",
+    "HostUnavailable",
+    "ServingUnsupported",
+    "NativeRuntimeFailed",
+    "OpenAiRequestFailed",
+};
+
+interface MeshNodeHandle {
+    [Throws=FfiError]
+    void start();
+    [Throws=FfiError]
+    void stop();
+    [Throws=FfiError]
+    NodeStatusNative status();
+    [Throws=FfiError]
+    void join_token(string token);
+    [Throws=FfiError]
+    sequence<ModelNative> inference_list_models();
+    [Throws=FfiError]
+    OpenAiResponseNative openai_request(string path, string body_json);
+    [Throws=FfiError]
+    string openai_stream(string path, string body_json, OpenAiStreamListener listener);
+    void cancel(string request_id);
+};
+
+callback interface OpenAiStreamListener {
+    void on_event(OpenAiStreamEventNative event);
+};
+callback interface NativeRuntimeProgressListener {
+    void on_progress(NativeRuntimeDownloadProgressNative event);
+};
+
+dictionary NodeStatusNative {
+    boolean running;
+    string mode;
+    string api_base_url;
+    string console_url;
+    string payload_json;
+};
+
+dictionary ModelNative {
+    string id;
+    string name;
+    u32? context_length;
+};
+
+dictionary OpenAiResponseNative {
+    u16 status_code;
+    string? content_type;
+    string body;
+};
+
+[Enum]
+interface OpenAiStreamEventNative {
+    Started(string request_id, u16 status_code, string? content_type);
+    Sse(string request_id, string? event_type, string data, string raw);
+    Completed(string request_id);
+    Failed(string request_id, u16? status_code, string error, string? body);
+};
+
+[Enum]
+interface NativeRuntimeVerificationPolicyNative {
+    RequireChecksum();
+    RequireChecksumAndSignature();
+};
+
+[Enum]
+interface NativeRuntimePruneModeNative {
+    KeepActiveAndPrevious();
+    ActiveOnly();
+};
+
+dictionary NativeRuntimeInstallOptionsNative {
+    string? mesh_version;
+    string? skippy_abi_version;
+    string selection;
+    string? manifest_path;
+    string? manifest_url;
+    sequence<string> bundle_dirs;
+    string? cache_dir;
+    NativeRuntimeVerificationPolicyNative verification_policy;
+    boolean allow_download;
+};
+
+dictionary NativeRuntimeDownloadProgressNative {
+    string native_runtime_id;
+    string url;
+    u64 downloaded_bytes;
+    u64? total_bytes;
+    boolean finished;
+};
+
+dictionary InstalledNativeRuntimeNative {
+    string mesh_version;
+    string native_runtime_id;
+    string flavor;
+    string path;
+    string? skippy_abi_version;
+};
+
+dictionary NativeRuntimeInstallOutcomeNative {
+    string status;
+    InstalledNativeRuntimeNative runtime;
+    string selected_native_runtime_id;
+    string selected_source;
+};
+
+dictionary NativeRuntimePruneResultNative {
+    sequence<string> removed_dirs;
+};

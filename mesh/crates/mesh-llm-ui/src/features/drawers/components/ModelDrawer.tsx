@@ -1,0 +1,238 @@
+import { useId } from 'react'
+import { Cpu, HardDrive, Hash, Network } from 'lucide-react'
+import { StatusBadge } from '@/components/ui/StatusBadge'
+import type { StatusBadgeTone } from '@/components/ui/StatusBadge'
+import { Drawer } from '@/features/drawers/components/Drawer'
+import { drawerIcon } from '@/features/drawers/lib/badge-styles'
+import { modelStatusBadge } from '@/features/drawers/lib/model-status'
+import { DrawerHeader } from '@/features/drawers/components/DrawerHeader'
+import { KV } from '@/features/drawers/components/KV'
+import { SectionHead } from '@/features/drawers/components/SectionHead'
+import { LatencySource } from '@/lib/api/types'
+import { formatPeerLatencySummary } from '@/lib/format-latency'
+import { formatModelSizeGB } from '@/lib/format-model-size'
+import { fitLabelTone, headerFitLabel } from '@/lib/model-fit'
+import type { ConfigModel, ModelSummary, Peer } from '@/features/app-tabs/types'
+
+type DrawerModel = ConfigModel | ModelSummary
+type ModelDrawerProps = { open: boolean; model?: DrawerModel; peers?: Peer[]; onClose: () => void }
+
+function isConfigModel(model: DrawerModel): model is ConfigModel {
+  return 'id' in model
+}
+
+function modelSubtitle(model: DrawerModel) {
+  return isConfigModel(model) ? model.family : (model.fullId ?? model.family)
+}
+
+function isQuantTag(tag: string): boolean {
+  const upper = tag.toUpperCase()
+  if (upper.startsWith('IQ') || upper.startsWith('BF') || upper.startsWith('UD-')) return true
+  if (!upper.startsWith('Q') && !upper.startsWith('F')) return false
+  return upper.length >= 2 && upper[1] >= '0' && upper[1] <= '9'
+}
+
+function modelQuant(model: ModelSummary) {
+  if (model.quant) return model.quant
+  const separator = model.name.lastIndexOf(':')
+  if (separator >= 0) {
+    const tag = model.name.slice(separator + 1)
+    return isQuantTag(tag) ? tag : 'Unknown'
+  }
+  // No `:selector` tag: mirror the backend's derive_quantization_type
+  // (mesh-llm-host-runtime src/models/inventory.rs), which scans
+  // hyphen-separated name parts right-to-left for a quant marker.
+  const parts = model.name.replace(/\.gguf$/i, '').split('-')
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (isQuantTag(parts[i])) return parts[i]
+  }
+  return 'Unknown'
+}
+
+function fitBadgeTone(label?: string): StatusBadgeTone {
+  const tone = fitLabelTone(label)
+  return tone === 'good' || tone === 'warn' || tone === 'bad' ? tone : 'muted'
+}
+
+function modelSummaryContext(model: ModelSummary) {
+  return model.ctxMaxK === undefined ? model.context : `${model.ctxMaxK}k`
+}
+
+function peersForModel(model: ModelSummary, peers: Peer[] = []) {
+  return peers.filter((peer) => peer.hostedModels.includes(model.name))
+}
+
+export function ModelDrawer({ open, model, peers = [], onClose }: ModelDrawerProps) {
+  const titleId = useId()
+
+  return (
+    <Drawer ariaLabel="Model details" labelledBy={model ? titleId : undefined} open={open} onClose={onClose}>
+      {model ? (
+        <ModelDrawerContent model={model} onClose={onClose} peers={peers} titleId={titleId} />
+      ) : (
+        <div className="px-[18px] py-4 text-[length:var(--density-type-control)] text-fg-faint">No model selected.</div>
+      )}
+    </Drawer>
+  )
+}
+
+function ModelDrawerContent({
+  model,
+  peers,
+  onClose,
+  titleId
+}: {
+  model: DrawerModel
+  peers: Peer[]
+  onClose: () => void
+  titleId: string
+}) {
+  if (isConfigModel(model)) {
+    return (
+      <div>
+        <DrawerHeader
+          badges={
+            <>
+              <StatusBadge tone="muted">{model.quant}</StatusBadge>
+              <StatusBadge tone={model.vision ? 'accent' : 'muted'}>{model.vision ? 'vision' : 'text'}</StatusBadge>
+              <StatusBadge tone={model.moe ? 'accent' : 'muted'}>{model.moe ? 'moe' : 'dense'}</StatusBadge>
+            </>
+          }
+          onClose={onClose}
+          subtitle={modelSubtitle(model)}
+          title={model.name}
+          titleId={titleId}
+        />
+
+        <div className="pb-[20px] pt-[12px]">
+          <SectionHead icon={drawerIcon(Cpu)}>Model metadata</SectionHead>
+          <div className="grid grid-cols-2 gap-[8px] px-[18px]">
+            <KV icon={drawerIcon(Cpu)} label="Params">
+              {model.paramsB}B
+            </KV>
+            <KV icon={drawerIcon(HardDrive)} label="Size">
+              {formatModelSizeGB(model.sizeGB)}
+            </KV>
+            <KV icon={drawerIcon(HardDrive)} label="Disk">
+              {formatModelSizeGB(model.diskGB)}
+            </KV>
+            <KV icon={drawerIcon(Cpu)} label="Context">
+              {model.ctxMaxK}k
+            </KV>
+          </div>
+
+          <SectionHead icon={drawerIcon(Network)}>Capabilities</SectionHead>
+          <div className="flex flex-wrap gap-[6px] px-[18px]">
+            {model.tags.map((tag) => (
+              <StatusBadge key={tag} tone="accent">
+                {tag}
+              </StatusBadge>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const activePeers = peersForModel(model, peers)
+  const availability = model.nodeCount ?? (activePeers.length || 1)
+  const status = modelStatusBadge(model.status)
+
+  return (
+    <div>
+      <DrawerHeader
+        badges={
+          <>
+            <StatusBadge dot tone={status.tone}>
+              {status.label}
+            </StatusBadge>
+            <StatusBadge tone={fitBadgeTone(model.fitLabel)}>{headerFitLabel(model.fitLabel)}</StatusBadge>
+          </>
+        }
+        onClose={onClose}
+        subtitle={modelSubtitle(model)}
+        title={model.displayName || model.name}
+        titleId={titleId}
+      />
+
+      <div className="pb-[24px] pt-[12px]">
+        <h3 className="sr-only">Model metadata</h3>
+        <span className="sr-only">{model.context}</span>
+        <div className="flex gap-[8px] px-[18px]">
+          <KV icon={drawerIcon(Network)} label="Availability">
+            {availability} node{availability === 1 ? '' : 's'}
+          </KV>
+          <KV icon={drawerIcon(HardDrive)} label="Mesh VRAM">
+            {formatModelSizeGB(model.meshVramGB)}
+          </KV>
+          <KV icon={drawerIcon(Cpu)} label="Context">
+            {modelSummaryContext(model)}
+          </KV>
+          <KV icon={drawerIcon(Cpu)} label="Quant">
+            {modelQuant(model)}
+          </KV>
+        </div>
+
+        <SectionHead icon={drawerIcon(Network)}>Capabilities</SectionHead>
+        <div className="flex flex-wrap gap-[6px] px-[18px]">
+          {model.tags.map((tag) => (
+            <StatusBadge key={tag} tone="accent">
+              {tag}
+            </StatusBadge>
+          ))}
+        </div>
+
+        <SectionHead icon={drawerIcon(Hash)}>Files</SectionHead>
+        <div className="flex flex-col gap-[8px] px-[18px]">
+          <KV icon={drawerIcon(Hash)} label="Shorthand">
+            {model.name}
+          </KV>
+          <KV icon={drawerIcon(Hash)} label="Full name">
+            {model.fullId ?? model.name}.gguf
+          </KV>
+        </div>
+
+        <SectionHead icon={drawerIcon(Network)}>Active peers</SectionHead>
+        <div className="mx-[18px] overflow-hidden rounded-[var(--radius)] border border-border-soft bg-background">
+          <div className="grid grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] bg-panel-strong px-[12px] py-[8px] text-[length:var(--density-type-label)] font-medium uppercase tracking-[0.5px] text-fg-faint">
+            <div>Node</div>
+            <div>Latency</div>
+            <div>VRAM</div>
+            <div>Share</div>
+          </div>
+
+          {activePeers.length ? (
+            activePeers.map((peer) => (
+              <div
+                className="grid grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] items-center border-t border-border-soft px-[12px] py-[10px] font-mono text-[length:var(--density-type-caption-lg)]"
+                key={peer.id}
+              >
+                <span>{peer.shortId ?? peer.hostname}</span>
+                <span className="text-fg-faint">
+                  {formatPeerLatencySummary({
+                    latencyMs: peer.latencyMs ?? null,
+                    source: peer.latencySource ?? LatencySource.UNSPECIFIED,
+                    ageMs: peer.latencyAgeMs ?? null,
+                    observerId: peer.latencyObserverId ?? null
+                  })}
+                </span>
+                <span>{formatModelSizeGB(peer.vramGB)}</span>
+                <StatusBadge tone="accent">100%</StatusBadge>
+              </div>
+            ))
+          ) : (
+            <div className="border-t border-border-soft px-[12px] py-[12px] text-[length:var(--density-type-caption-lg)] text-fg-faint">
+              No active peers for this model.
+            </div>
+          )}
+        </div>
+
+        {model.activitySummary ? (
+          <div className="px-[18px] pt-[8px] text-[length:var(--density-type-caption)] leading-[16px] text-fg-faint">
+            {model.activitySummary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}

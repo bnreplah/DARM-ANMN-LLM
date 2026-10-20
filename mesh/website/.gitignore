@@ -1,0 +1,7 @@
+node_modules/
+.cache/
+.eleventy-cache/
+.playwright-mcp/
+src/assets/site.generated.css
+src/_data/cliInventory.json
+test-results/

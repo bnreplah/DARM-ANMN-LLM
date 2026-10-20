@@ -1,0 +1,17 @@
+[package]
+name = "mesh-llm-routing"
+version.workspace = true
+edition = "2024"
+description = "Shared routing targets and model routing helpers for Mesh LLM"
+license = "Apache-2.0"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+readme = "README.md"
+keywords = ["llm", "mesh", "routing", "inference"]
+categories = ["network-programming"]
+
+[dependencies]
+blake3.workspace = true
+iroh = { version = "1.0.3", default-features = false, features = ["metrics", "fast-apple-datapath", "portmapper", "tls-aws-lc-rs"] }
+serde.workspace = true
+serde_json.workspace = true
