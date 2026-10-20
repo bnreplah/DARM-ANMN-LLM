@@ -12,9 +12,13 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+darm-compute = { path = "../darm-compute", version = "0.1.0" }
 darm-core = { path = "../darm-core", version = "0.1.0" }
 darm-memory = { path = "../darm-memory", version = "0.1.0" }
+darm-protocol = { path = "../darm-protocol", version = "0.1.0" }
 darm-swarm = { path = "../darm-swarm", version = "0.1.0" }
+getrandom = "0.3"
 reqwest = { version = "0.13", features = ["json"] }
 mesh-llm-plugin = { path = "../../../mesh/crates/mesh-llm-plugin", version = "0.78.0" }
 schemars = "1"

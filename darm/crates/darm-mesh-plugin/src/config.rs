@@ -5,8 +5,36 @@
 //! explicitly trusted, nothing is gossiped on a public mesh without an
 //! explicit opt-in, and replication is never proposed automatically.
 
-use darm_core::{NodeId, Result};
+use darm_compute::{ContributionPolicy, Device, FormFactor, WorkloadKind};
+use darm_core::{DarmError, NodeId, Result};
 use std::path::PathBuf;
+
+/// Whether gossip runs inside authenticated Noise sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Plaintext signed gossip only (pre-session behaviour).
+    Off,
+    /// Establish sessions with every peer and seal traffic to peers that
+    /// have one; plaintext signed gossip still flows to peers that do not.
+    Preferred,
+    /// Only handshakes travel in the clear; everything else is sealed, and
+    /// plaintext gossip from peers is dropped. Forced on public meshes.
+    Required,
+}
+
+impl SessionMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => Ok(Self::Off),
+            "preferred" | "on" | "1" | "true" => Ok(Self::Preferred),
+            "required" | "strict" => Ok(Self::Required),
+            other => Err(DarmError::Rejected(format!(
+                "DARM_SESSIONS must be off|preferred|required, got {other:?}"
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DarmConfig {
@@ -37,6 +65,18 @@ pub struct DarmConfig {
     pub archive_url: Option<String>,
     /// File holding the archive's write bearer token.
     pub archive_token_file: Option<PathBuf>,
+    /// Join the compute pool (advertise this node's CPUs/GPUs).
+    pub compute_pool: bool,
+    pub form_factor: FormFactor,
+    /// Operator-declared accelerators (`DARM_GPUS`).
+    pub gpus: Vec<Device>,
+    /// Workload kinds this node's operator agrees to serve.
+    pub workloads: Vec<WorkloadKind>,
+    /// What the device owner contributes, and under which conditions.
+    pub policy: ContributionPolicy,
+    /// Start in a metered-network state (phones on cellular).
+    pub metered: bool,
+    pub sessions: SessionMode,
 }
 
 impl Default for DarmConfig {
@@ -56,6 +96,13 @@ impl Default for DarmConfig {
             target_latency_ms: 8_000.0,
             archive_url: None,
             archive_token_file: None,
+            compute_pool: true,
+            form_factor: FormFactor::Server,
+            gpus: Vec::new(),
+            workloads: vec![WorkloadKind::Inference, WorkloadKind::Embedding],
+            policy: ContributionPolicy::for_form_factor(FormFactor::Server),
+            metered: false,
+            sessions: SessionMode::Preferred,
         }
     }
 }
@@ -89,9 +136,62 @@ fn node_list(name: &str) -> Result<Vec<NodeId>> {
         .collect()
 }
 
+fn parse_list<T>(name: &str, parse: impl Fn(&str) -> Option<T>) -> Result<Option<Vec<T>>> {
+    let Ok(value) = std::env::var(name) else {
+        return Ok(None);
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|item| {
+            parse(item)
+                .ok_or_else(|| DarmError::Rejected(format!("{name}: unknown value {item:?}")))
+        })
+        .collect::<Result<Vec<T>>>()
+        .map(Some)
+}
+
+/// Contribution policy: form-factor defaults, then explicit overrides.
+fn policy_from_env(form_factor: FormFactor) -> Result<ContributionPolicy> {
+    let mut policy = ContributionPolicy::for_form_factor(form_factor);
+    policy.contribute = flag("DARM_CONTRIBUTE", policy.contribute);
+    if let Some(devices) = parse_list("DARM_POOL_DEVICES", |d| {
+        match d.to_ascii_lowercase().as_str() {
+            "cpu" => Some(true),
+            "gpu" => Some(false),
+            _ => None,
+        }
+    })? {
+        policy.allow_cpu = devices.contains(&true);
+        policy.allow_gpu = devices.contains(&false);
+    }
+    policy.max_share_pct = number("DARM_POOL_SHARE_PCT", policy.max_share_pct).clamp(1, 100);
+    policy.require_charging = flag("DARM_POOL_REQUIRE_CHARGING", policy.require_charging);
+    policy.min_battery_pct = number("DARM_POOL_MIN_BATTERY_PCT", policy.min_battery_pct).min(100);
+    policy.allow_metered = flag("DARM_POOL_ALLOW_METERED", policy.allow_metered);
+    Ok(policy)
+}
+
 impl DarmConfig {
     pub fn from_env() -> Result<Self> {
         let defaults = Self::default();
+        let form_factor = match std::env::var("DARM_FORM_FACTOR") {
+            Ok(value) => FormFactor::parse(&value).ok_or_else(|| {
+                DarmError::Rejected(format!("DARM_FORM_FACTOR: unknown form factor {value:?}"))
+            })?,
+            Err(_) => defaults.form_factor,
+        };
+        let gpus = match std::env::var("DARM_GPUS") {
+            Ok(value) => value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .take(darm_compute::device::MAX_DEVICES - 1)
+                .map(Device::parse_gpu)
+                .collect::<Result<Vec<_>>>()?,
+            Err(_) => Vec::new(),
+        };
         let data_dir = std::env::var_os("DARM_DATA_DIR")
             .map(PathBuf::from)
             .or_else(|| {
@@ -121,6 +221,18 @@ impl DarmConfig {
                 _ => None,
             },
             archive_token_file: std::env::var_os("DARM_ARCHIVE_TOKEN_FILE").map(PathBuf::from),
+            compute_pool: flag("DARM_COMPUTE_POOL", defaults.compute_pool),
+            form_factor,
+            gpus,
+            workloads: parse_list("DARM_WORKLOADS", WorkloadKind::parse)?
+                .filter(|w| !w.is_empty())
+                .unwrap_or(defaults.workloads),
+            policy: policy_from_env(form_factor)?,
+            metered: flag("DARM_METERED", defaults.metered),
+            sessions: match std::env::var("DARM_SESSIONS") {
+                Ok(value) => SessionMode::parse(&value)?,
+                Err(_) => defaults.sessions,
+            },
         })
     }
 }
@@ -149,6 +261,16 @@ pub fn validate_archive_url(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_modes_parse_strictly() {
+        assert_eq!(
+            SessionMode::parse("Required").unwrap(),
+            SessionMode::Required
+        );
+        assert_eq!(SessionMode::parse("off").unwrap(), SessionMode::Off);
+        assert!(SessionMode::parse("maybe").is_err());
+    }
 
     #[test]
     fn archive_url_requires_tls_off_loopback() {

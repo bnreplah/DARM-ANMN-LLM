@@ -26,9 +26,12 @@ protocol spec for other implementations) live in the companion repository
                          concrete models on this node or mesh peers (Skippy)
 
  darm-mesh-plugin ◄──── mesh channel "darm.v1" (iroh QUIC) ────► peers
+   │                  └─ optional Noise sessions: sealed, padded, morphing frames
    ├─ darm-memory   signed content-addressed memories, short/long-term tiers
    ├─ darm-core     identities, canonical encoding, Merkle, quorum ledger
-   └─ darm-swarm    lifecycle, pheromones, genome, governed replication
+   ├─ darm-swarm    lifecycle, pheromones, genome, governed replication
+   ├─ darm-compute  CPU/GPU/NPU/phone pool, heterogeneous scheduler, receipts
+   └─ darm-protocol polymorphic negotiation, identity-bound sessions, adaptation
 ```
 
 | Crate | Role |
@@ -36,6 +39,8 @@ protocol spec for other implementations) live in the companion repository
 | [`darm-core`](crates/darm-core) | Ed25519 node identities; canonical, domain-separated signing encoding; BLAKE3 Merkle trees with inclusion proofs; the memory ledger (signed entries, blocks final at >2/3 validator weight, one vote per height). |
 | [`darm-memory`](crates/darm-memory) | Distributed associative memory: signed records, `Local`/`Mesh` scopes, decay and consolidation, hashing embedder, author-only tombstones, anti-entropy inventory, injection-hardened prompt rendering. |
 | [`darm-swarm`](crates/darm-swarm) | Biomimetic lifecycle (germinating → active → flowering → reproducing, resting, damaged/healing) driven by measured success, latency and load; pheromone field with half-life decay and ACO ranking; deterministic genomes; replication *recommendations*. |
+| [`darm-compute`](crates/darm-compute) | Compute pool over CPUs, GPUs, NPUs and phones: device profiles and live conditions, owner contribution policy, signed short-lived capability adverts (optionally proven to a mesh endpoint by the host's plugin-key binding), smooth-weighted-round-robin shard planning across CPU and GPU with replicas on distinct nodes, measurement-corrected throughput, adaptive shard sizing, signed work receipts and majority tallies that become ledger `ComputeCommit` entries. |
+| [`darm-protocol`](crates/darm-protocol) | Polymorphic and adaptive protocols: per-pair negotiation of cipher suite (ChaCha20-Poly1305 vs AES-GCM by hardware), codec (JSON/CBOR) and padding; Noise XX handshakes (`snow`) bound to DARM Ed25519 identities; sealed frames with masked nonces, bucket padding, replay windows and bounded fragmentation; RFC 6298 RTT estimation and AIMD batching tuned by battery, metered and thermal state. |
 | [`darm-mesh-plugin`](crates/darm-mesh-plugin) | The built-in mesh-llm plugin: `darm` virtual model, gossip on `darm.v1`, ledger block production, MCP/HTTP operations. Registered by `mesh-llm-host-runtime` as an optional in-process built-in. |
 
 ## Using it
@@ -58,7 +63,71 @@ Responses carry `x-darm-memories` (memories injected), `x-darm-route`
 
 Operations (projected by the host as MCP tools and plugin HTTP):
 `darm_status`, `darm_memory_search`, `darm_memory_store`,
-`darm_memory_forget`, `darm_ledger_proof`.
+`darm_memory_forget`, `darm_ledger_proof`, and the compute pool's
+`darm_compute_status`, `darm_compute_conditions`, `darm_compute_plan`,
+`darm_compute_receipt`, `darm_compute_tally`.
+
+## Compute pool: CPUs and GPUs, servers and phones
+
+mesh-llm pools GPU memory to serve models. DARM adds a pool for compute
+that treats every processor alike, so a mesh can run on GPUs, on CPUs, or on
+both at once, and a phone can join and draw on the whole pool:
+
+- Each node signs a **capability advert** every minute (slower on battery
+  or metered links): its devices (CPU detected; GPUs declared with
+  `DARM_GPUS`), the share its owner contributes, the workloads it serves and
+  live conditions. Adverts expire after at most ten minutes, carry a
+  sequence number against replay, and are bound to one DARM network. When
+  the host supports mesh-llm plugin keys, the advert also carries the host's
+  signature binding the DARM key to the node's mesh endpoint, so the mapping
+  from a mesh candidate to its hardware is proven, not claimed.
+- **Routing**: the `darm` model weights each candidate endpoint by its pooled
+  hardware (faster, idler endpoints score higher; phones on battery lower),
+  on top of the pheromone trails.
+- **Jobs**: `darm_compute_plan` splits a job (embedding, indexing,
+  training shards, verification, inference) across CPU, GPU and NPU slots in
+  proportion to effective throughput by smooth weighted round robin, or
+  restricts it with `cpu_only` / `gpu_only` / `prefer_*`. Each shard gets
+  `redundancy` replicas on distinct nodes; `same_kind_replicas` keeps
+  replicas on one device kind when CPU and GPU kernels round differently.
+  Each assignment carries a suggested shard size so a phone gets small
+  shards and a GPU large ones (adaptive sizing toward a target duration).
+- **Proof of useful work**: workers sign receipts (`darm_compute_receipt`);
+  `darm_compute_tally` accepts only receipts from assigned workers over the
+  planned inputs, takes the strict-majority output per shard, names
+  dissenters (evidence for validator reputation reports), feeds measured
+  throughput back into the scheduler, and with `commit: true` writes a
+  `ComputeCommit` (job, result root, receipt root) to the ledger. This
+  replaces the PoC's hash-burning "Proof of Learning" with work that was
+  useful and cross-checked.
+- **Owner consent on mobile**: phones and tablets contribute by default only
+  while charging, above 50% battery, on unmetered networks and not hot; a
+  mobile app reports changes through `darm_compute_conditions`. A phone that
+  is not contributing still uses the pool.
+
+Nothing in the pool executes remote code: workloads are named kinds that each
+operator chose to serve; DARM plans, measures and verifies.
+
+## Sessions: polymorphic and adaptive protocols
+
+With `DARM_SESSIONS=preferred` (default) every node runs a Noise XX
+handshake with each peer and seals gossip to peers that completed one:
+
+- **Polymorphic**: each pair negotiates suite, codec and padding from both
+  sides' ranked offers (lowest rank sum wins). A server with AES-NI talking
+  to another uses AES-GCM, JSON and power-of-two padding; with a phone on
+  cellular it lands on ChaCha20-Poly1305, CBOR and light padding. Frames have
+  no fixed bytes on the wire: the explicit nonce is masked like QUIC packet
+  numbers and plaintexts are padded to buckets.
+- **Identity-bound**: each side signs the handshake hash and its Noise static
+  key with its DARM Ed25519 identity, so gossip inside a session is
+  attributable to a proven node. Both offers are in the authenticated
+  transcript, so a man in the middle cannot downgrade the choice.
+- **Adaptive**: per-link RFC 6298 RTT estimates set request timeouts; AIMD
+  sizes memory batches; battery, metered and thermal state stretch gossip
+  intervals, shrink fan-out and switch announcements to pull-only.
+- Sessions last at most an hour (fresh keys each time), replay windows and
+  reassembly are bounded, and a peer may start one handshake per 5 s.
 
 ## Configuration
 
@@ -75,6 +144,16 @@ Operations (projected by the host as MCP tools and plugin HTTP):
 | `DARM_PROPOSE_REPLICATION` | `0` | Submit `replicate` ledger proposals when the swarm policy recommends it. |
 | `DARM_RECALL_TOP_K` / `DARM_RECALL_BUDGET_CHARS` | 5 / 4000 | Memory injection size. |
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
+| `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
+| `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
+| `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |
+| `DARM_GPUS` | none | Comma-separated `backend:memory_mb:gflops[:label]`, e.g. `cuda:24576:82000:rtx4090`. |
+| `DARM_WORKLOADS` | `inference,embedding` | Workload kinds this node serves (`inference`, `embedding`, `indexing`, `training`, `verification`). |
+| `DARM_CONTRIBUTE` | form factor | Contribute at all. |
+| `DARM_POOL_DEVICES` | `cpu,gpu` | Which device kinds to contribute. |
+| `DARM_POOL_SHARE_PCT` | 100 (50 phones) | Share of each device offered. |
+| `DARM_POOL_REQUIRE_CHARGING` / `DARM_POOL_MIN_BATTERY_PCT` / `DARM_POOL_ALLOW_METERED` | form factor | Battery and data-plan consent. |
+| `DARM_METERED` | `0` | Start in a metered-network state. |
 
 A three-node private chain: run each node once to create its identity
 (`darm_status` shows `node_id`), then on every node set the same
@@ -123,7 +202,24 @@ DARM-ANN was built security-first. The assumptions and controls:
   operator-controlled replicator in the DARM-ANN infrastructure repo may act
   on a passed proposal.
 - **Keys at rest.** The identity key is created 0600 and refused if other
-  users can read it; secrets are zeroized and never printed.
+  users can read it; secrets are zeroized and never printed. Noise static
+  keys live only in memory for the life of the process; each handshake
+  re-authenticates them with the identity key.
+- **Authenticated sessions.** Noise XX (via `snow`) with identity binding;
+  negotiation is downgrade-resistant (offers in the prologue and the
+  encrypted transcript, one retry at most); frames are replay-protected and
+  the window only moves on authentic frames; a sealed frame can never carry
+  another handshake or sealed frame. Public meshes require sessions.
+- **Compute integrity.** Adverts are signed, network-bound, short-lived and
+  replay-protected; implausible throughput claims are rejected and all
+  claims are corrected by measured receipts. Receipts are accepted only from
+  workers assigned that shard over the planned input, and results need a
+  strict majority of assigned replicas on distinct nodes. Ledger
+  `ComputeCommit`s are keyed by (coordinator, job), so copying a job id seen
+  in gossip cannot pre-empt its coordinator. Majority voting assumes
+  independent replicas; restrict trust for high-value jobs.
+- **Rate limits.** Besides per-peer buckets, a node-wide bucket caps inbound
+  gossip, because peer ids are claims and can be rotated.
 
 ## What changed from the PoC
 

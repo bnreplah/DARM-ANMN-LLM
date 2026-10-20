@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LABEL_BYTES: usize = 64;
 /// Largest reputation change one report may carry (1.0 reputation unit).
 pub const MAX_REPUTATION_DELTA_MILLI: i32 = 1_000;
+/// Most shards one pooled compute job may commit.
+pub const MAX_COMPUTE_SHARDS: u32 = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -41,6 +43,18 @@ pub enum EntryBody {
     },
     /// Vote on a proposal, referenced by the proposal entry's id.
     Vote { proposal: Hash32, support: bool },
+    /// Proof-of-useful-work record for a pooled compute job (CPU, GPU or
+    /// both). The coordinator commits the Merkle root of the shard outputs
+    /// that a majority of independent workers agreed on, and the root of the
+    /// signed worker receipts behind it. Receipts and outputs stay off-ledger;
+    /// anyone holding them can check them against these roots.
+    ComputeCommit {
+        job: Hash32,
+        result_root: Hash32,
+        receipts_root: Hash32,
+        shards: u32,
+        workers: u16,
+    },
 }
 
 impl EntryBody {
@@ -96,6 +110,21 @@ impl EntryBody {
             Self::Vote { proposal, support } => {
                 encoder.u8(6).fixed32(proposal.as_bytes()).bool(*support);
             }
+            Self::ComputeCommit {
+                job,
+                result_root,
+                receipts_root,
+                shards,
+                workers,
+            } => {
+                encoder
+                    .u8(7)
+                    .fixed32(job.as_bytes())
+                    .fixed32(result_root.as_bytes())
+                    .fixed32(receipts_root.as_bytes())
+                    .u32(*shards)
+                    .u16(*workers);
+            }
         }
     }
 
@@ -129,6 +158,17 @@ impl EntryBody {
                 Ok(())
             }
             Self::Proposal { kind, .. } => check_label("kind", kind),
+            Self::ComputeCommit {
+                shards, workers, ..
+            } => {
+                if *shards == 0 || *shards > MAX_COMPUTE_SHARDS {
+                    return Err(DarmError::malformed("entry", "shards out of range"));
+                }
+                if *workers == 0 {
+                    return Err(DarmError::malformed("entry", "compute needs a worker"));
+                }
+                Ok(())
+            }
         }
     }
 }

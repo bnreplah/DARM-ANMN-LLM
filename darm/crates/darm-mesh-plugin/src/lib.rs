@@ -13,13 +13,22 @@
 //!   proposals ([`darm_swarm`]);
 //! - **operations** projected by the host as MCP tools and plugin HTTP:
 //!   `darm_status`, `darm_memory_search`, `darm_memory_store`,
-//!   `darm_memory_forget`, `darm_ledger_proof`.
+//!   `darm_memory_forget`, `darm_ledger_proof`, and the compute pool's
+//!   `darm_compute_*` operations;
+//! - a **compute pool** of CPUs, GPUs and phones ([`compute`],
+//!   [`darm_compute`]) whose verified results are committed to the ledger;
+//! - **polymorphic, adaptive sessions** ([`sessions`], [`darm_protocol`]):
+//!   Noise handshakes bound to DARM identities, negotiated per peer pair,
+//!   with sealed, padded frames and link/device-aware tuning.
 
 pub mod archive;
 pub mod chat;
+pub mod compute;
+pub mod compute_ops;
 pub mod config;
 pub mod node;
 pub mod ops;
+pub mod sessions;
 pub mod wire;
 
 use crate::config::DarmConfig;
@@ -70,16 +79,51 @@ pub async fn run(stream: mesh_llm_plugin::LocalStream) -> anyhow::Result<()> {
     result
 }
 
+/// Seal (per the node's session mode) and send gossip.
 pub async fn send_outbound(
     context: &mut PluginContext<'_>,
+    node: &SharedNode,
     outbound: Vec<Outbound>,
 ) -> anyhow::Result<()> {
+    if outbound.is_empty() {
+        return Ok(());
+    }
+    let outbound = node
+        .lock()
+        .expect("darm node lock")
+        .finalize(outbound, now_ms());
     for item in outbound {
         context
             .send_json_channel(CHANNEL, item.target, item.message.kind(), &item.message)
             .await?;
     }
     Ok(())
+}
+
+/// Ask the host to bind this node's DARM key to its mesh endpoint
+/// (mesh-llm plugin keys), so compute adverts can prove which endpoint they
+/// belong to. Hosts without the capability simply leave adverts unbound.
+async fn bind_mesh_endpoint(context: &mut PluginContext<'_>, node: &SharedNode) {
+    let key = node.lock().expect("darm node lock").node_id().0.to_vec();
+    match context.announce_plugin_key(key).await {
+        Ok(response) => {
+            let binding = <[u8; 64]>::try_from(response.binding_signature.as_slice())
+                .ok()
+                .map(|bytes| darm_compute::advert::MeshBinding {
+                    plugin: PLUGIN_ID.into(),
+                    signature: darm_core::Signature::Ed25519(bytes),
+                });
+            let mut node = node.lock().expect("darm node lock");
+            let node_id = node.node_id();
+            // Keep the binding only if it verifies under our plugin name.
+            let binding = binding.filter(|b| b.verify(&response.node_id, &node_id).is_ok());
+            if binding.is_none() {
+                tracing::debug!("darm mesh binding did not verify; adverts stay unbound");
+            }
+            node.compute.set_mesh_binding(response.node_id, binding);
+        }
+        Err(error) => tracing::debug!(%error, "darm mesh endpoint binding unavailable"),
+    }
 }
 
 pub fn plugin(node: SharedNode) -> SimplePlugin {
@@ -114,9 +158,11 @@ pub fn plugin(node: SharedNode) -> SimplePlugin {
                 Box::pin(async move {
                     let invocation: VirtualModelInvocation = request.arguments()?;
                     let infer_context = context.clone();
-                    let (response, outbound) =
-                        chat::handle(invocation, node, |req| infer_context.infer(req)).await;
-                    if let Err(error) = send_outbound(&mut context, outbound).await {
+                    let (response, outbound) = chat::handle(invocation, Arc::clone(&node), |req| {
+                        infer_context.infer(req)
+                    })
+                    .await;
+                    if let Err(error) = send_outbound(&mut context, &node, outbound).await {
                         tracing::debug!(%error, "darm gossip send failed");
                     }
                     structured_tool_result(response)
@@ -158,11 +204,12 @@ pub fn plugin(node: SharedNode) -> SimplePlugin {
             let mut context = context.owned();
             let node = Arc::clone(&ticker_node);
             tokio::spawn(async move {
+                bind_mesh_endpoint(&mut context, &node).await;
                 let mut interval = tokio::time::interval(TICK_INTERVAL);
                 loop {
                     interval.tick().await;
                     let outbound = node.lock().expect("darm node lock").tick(now_ms());
-                    if let Err(error) = send_outbound(&mut context, outbound).await {
+                    if let Err(error) = send_outbound(&mut context, &node, outbound).await {
                         // The host connection is gone: the plugin is shutting down.
                         tracing::debug!(%error, "darm ticker stopping");
                         break;
@@ -190,7 +237,7 @@ pub fn plugin(node: SharedNode) -> SimplePlugin {
                 wire,
                 now_ms(),
             );
-            send_outbound(context, outbound).await
+            send_outbound(context, &node, outbound).await
         })
     })
     .on_mesh_event(move |event, context| {
@@ -202,8 +249,11 @@ pub fn plugin(node: SharedNode) -> SimplePlugin {
             let Some(peer) = event.peer.as_ref().map(|p| p.peer_id.clone()) else {
                 return Ok(());
             };
-            let outbound = node.lock().expect("darm node lock").on_peer_up(&peer);
-            send_outbound(context, outbound).await
+            let outbound = node
+                .lock()
+                .expect("darm node lock")
+                .on_peer_up(&peer, now_ms());
+            send_outbound(context, &node, outbound).await
         })
     })
     .with_health(move |_context| {

@@ -4,7 +4,8 @@
 //!    trusted hits are rendered into a fenced, injection-hardened system
 //!    message.
 //! 2. **Route**: concrete mesh models are ranked by pheromone trails
-//!    (ant-colony optimization) and tried in order with fallback.
+//!    (ant-colony optimization), weighted by each endpoint's CPU/GPU
+//!    capacity from the compute pool, and tried in order with fallback.
 //! 3. **Learn**: every attempt lays trail or danger pheromone and feeds the
 //!    node's lifecycle; a successful exchange is remembered (locally unless
 //!    sharing is enabled) and, when mesh-scoped, committed to the ledger.
@@ -244,16 +245,26 @@ fn recall_into(
 }
 
 /// Phase 2a: order candidate routes by pheromone desirability.
+///
+/// The heuristic combines model size with the serving endpoint's place in
+/// the compute pool: faster, idler hardware scores higher, and phones on
+/// battery score lower so the mesh spares them.
 fn rank(node: &SharedNode, candidates: &[VirtualModelCandidate]) -> Vec<RouteKey> {
+    let now = now_ms();
+    let node = lock(node);
     let routes: Vec<(RouteKey, f64)> = candidates
         .iter()
         .map(|c| {
-            let heuristic = c.parameter_count_b.map_or(1.0, |b| b.max(0.5).sqrt());
-            (route_key(c), heuristic)
+            let size = c.parameter_count_b.map_or(1.0, |b| b.max(0.5).sqrt());
+            let compute = c
+                .target_node_id
+                .as_deref()
+                .map_or(1.0, |peer| node.route_factor(peer, now));
+            (route_key(c), size * compute)
         })
         .collect();
-    let seed = now_ms() ^ TURN_SEED.fetch_add(1, Ordering::Relaxed).rotate_left(32);
-    lock(node).rank_routes(&routes, now_ms(), seed)
+    let seed = now ^ TURN_SEED.fetch_add(1, Ordering::Relaxed).rotate_left(32);
+    node.rank_routes(&routes, now, seed)
 }
 
 /// Phase 2b: try routes in order, laying pheromone for every attempt.

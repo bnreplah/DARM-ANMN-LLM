@@ -97,6 +97,9 @@ pub fn manifest_entries() -> Vec<ManifestEntry> {
         operation::<IdArgs>("darm_memory_forget", DARM_MEMORY_FORGET_DESC).into(),
         operation::<IdArgs>("darm_ledger_proof", DARM_LEDGER_PROOF_DESC).into(),
     ]
+    .into_iter()
+    .chain(crate::compute_ops::manifest_entries())
+    .collect()
 }
 
 fn bad(error: impl std::fmt::Display) -> PluginError {
@@ -184,7 +187,7 @@ pub fn router(node: SharedNode) -> OperationRouter {
                     };
                     node.remember(record, &namespace, now_ms()).map_err(bad)?
                 };
-                send_outbound(context, outbound)
+                send_outbound(context, &n, outbound)
                     .await
                     .map_err(|e| PluginError::internal(e.to_string()))?;
                 Ok(json!({
@@ -208,7 +211,7 @@ pub fn router(node: SharedNode) -> OperationRouter {
                     .expect("darm node lock")
                     .forget(&id, now_ms())
                     .map_err(bad)?;
-                send_outbound(context, outbound)
+                send_outbound(context, &n, outbound)
                     .await
                     .map_err(|e| PluginError::internal(e.to_string()))?;
                 Ok(json!({ "forgotten": id }))
@@ -240,6 +243,7 @@ pub fn router(node: SharedNode) -> OperationRouter {
         },
     );
 
+    crate::compute_ops::register(&mut router, &node);
     router
 }
 
@@ -268,6 +272,11 @@ mod tests {
             "darm_memory_store",
             "darm_memory_forget",
             "darm_ledger_proof",
+            "darm_compute_status",
+            "darm_compute_conditions",
+            "darm_compute_plan",
+            "darm_compute_receipt",
+            "darm_compute_tally",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }

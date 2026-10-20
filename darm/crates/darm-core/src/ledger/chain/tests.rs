@@ -364,3 +364,63 @@ fn block_log_round_trip_and_tamper_detection() {
     std::fs::write(log.path(), tampered).unwrap();
     assert!(log.load(config(&[&node])).is_err());
 }
+
+#[test]
+fn compute_commits_finalize_once_per_job() {
+    let a = identity(1);
+    let b = identity(2);
+    let mut ledger = Ledger::new(config(&[&a]));
+    let chain = ledger.chain_id();
+    let job = Hash32::digest("compute-job", b"embed corpus");
+    let body = |seed: &[u8]| EntryBody::ComputeCommit {
+        job,
+        result_root: Hash32::digest("result", seed),
+        receipts_root: Hash32::digest("receipts", seed),
+        shards: 8,
+        workers: 3,
+    };
+    ledger
+        .submit(SignedEntry::sign(&a, chain, body(b"a"), NOW).unwrap(), NOW)
+        .unwrap();
+    // A second commit by the same coordinator is a duplicate and dropped.
+    ledger
+        .submit(SignedEntry::sign(&a, chain, body(b"a2"), NOW).unwrap(), NOW)
+        .unwrap();
+    // Someone copying the job id commits only under their own name and
+    // cannot displace the coordinator's record.
+    ledger
+        .submit(SignedEntry::sign(&b, chain, body(b"b"), NOW).unwrap(), NOW)
+        .unwrap();
+    let block = ledger.propose(&a, 0, NOW).unwrap().unwrap();
+    assert_eq!(block.entries.len(), 2);
+    ledger.attest(&a, &block.hash()).unwrap();
+    let record = ledger.state().compute_job(&a.node_id(), &job).unwrap();
+    assert_eq!(record.coordinator, a.node_id());
+    assert!(
+        [
+            Hash32::digest("result", b"a"),
+            Hash32::digest("result", b"a2")
+        ]
+        .contains(&record.result_root)
+    );
+    assert_eq!(
+        ledger
+            .state()
+            .compute_job(&b.node_id(), &job)
+            .unwrap()
+            .result_root,
+        Hash32::digest("result", b"b")
+    );
+    assert_eq!(ledger.state().compute_jobs(), 2);
+
+    for (shards, workers) in [(0, 1), (crate::ledger::MAX_COMPUTE_SHARDS + 1, 1), (1, 0)] {
+        let bad = EntryBody::ComputeCommit {
+            job,
+            result_root: Hash32::ZERO,
+            receipts_root: Hash32::ZERO,
+            shards,
+            workers,
+        };
+        assert!(SignedEntry::sign(&a, chain, bad, NOW).is_err());
+    }
+}
