@@ -273,6 +273,7 @@ mod tests {
             "darm_memory_forget",
             "darm_ledger_proof",
             "darm_compute_status",
+            "darm_resources",
             "darm_compute_conditions",
             "darm_compute_plan",
             "darm_compute_receipt",
@@ -292,5 +293,28 @@ mod tests {
             names.len(),
             "every routed operation is declared"
         );
+    }
+
+    #[test]
+    fn resources_reports_available_allocated_and_local() {
+        let node = crate::node::DarmNode::ephemeral(
+            crate::config::DarmConfig::default(),
+            darm_core::NodeIdentity::from_secret_bytes(&[2; 32]),
+            0,
+        )
+        .unwrap();
+        let view = node.compute.resources(&node.config, now_ms());
+        for section in ["available", "allocated", "local"] {
+            assert!(view.get(section).is_some(), "missing {section} section");
+        }
+        // No jobs are in flight on a fresh node, so nothing is allocated.
+        assert_eq!(view["allocated"]["jobs"], 0);
+        assert_eq!(view["allocated"]["busy_workers"], 0);
+        // The available and local views expose the fields an operator reads
+        // for node, GPU/NPU and accelerator-memory capacity.
+        assert!(view["available"].get("nodes").is_some());
+        assert!(view["available"].get("gpu_devices").is_some());
+        assert!(view["available"].get("accelerator_memory_mb").is_some());
+        assert!(view["local"].get("contributing").is_some());
     }
 }

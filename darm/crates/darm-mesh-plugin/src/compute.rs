@@ -156,4 +156,71 @@ impl ComputeState {
             })).collect::<Vec<_>>(),
         })
     }
+
+    /// Operator-facing resource view: how many nodes, how much CPU, GPU/NPU
+    /// and accelerator memory the pool offers right now (`available`), how
+    /// much is committed to in-flight jobs (`allocated`), and what this node
+    /// itself contributes (`local`). `status` reports the same facts spread
+    /// across `pool` and `plans`; this reshapes them into the capacity /
+    /// in-use split an operator reads when deciding whether to add nodes.
+    pub fn resources(&self, config: &DarmConfig, now_ms: u64) -> Value {
+        let pool = self.pool.summary(now_ms);
+
+        // In-flight allocation: shards dealt to each device kind across the
+        // jobs this node is coordinating, and the distinct workers holding
+        // them (a worker counts once even when it holds several shards).
+        let mut busy_workers = std::collections::BTreeSet::new();
+        let (mut cpu_shards, mut gpu_shards, mut npu_shards) = (0u64, 0u64, 0u64);
+        for plan in &self.plans {
+            cpu_shards += u64::from(plan.cpu_shards);
+            gpu_shards += u64::from(plan.gpu_shards);
+            npu_shards += u64::from(plan.npu_shards);
+            for assignment in &plan.assignments {
+                busy_workers.insert(assignment.worker);
+            }
+        }
+
+        // This node's own contribution, so a standalone node sees its local
+        // CPU/GPU even before any peer advert has arrived.
+        let contributing = self.profile.offer(&config.policy, &self.conditions);
+        let (mut local_cpu_cores, mut local_accel_mem, mut local_gflops) = (0u64, 0u64, 0u64);
+        for device in &self.profile.devices {
+            local_gflops += u64::from(device.gflops);
+            match device.kind {
+                darm_compute::DeviceKind::Cpu => local_cpu_cores += u64::from(device.compute_units),
+                _ => local_accel_mem += u64::from(device.memory_mb),
+            }
+        }
+
+        json!({
+            "enabled": self.enabled,
+            "available": {
+                "nodes": pool.nodes,
+                "mobile_nodes": pool.mobile_nodes,
+                "cpu_devices": pool.cpu_devices,
+                "cpu_cores": pool.cpu_cores,
+                "gpu_devices": pool.gpu_devices,
+                "npu_devices": pool.npu_devices,
+                "accelerator_memory_mb": pool.accelerator_memory_mb,
+                "cpu_gflops": pool.cpu_gflops,
+                "accelerator_gflops": pool.accelerator_gflops,
+            },
+            "allocated": {
+                "jobs": self.plans.len(),
+                "busy_workers": busy_workers.len(),
+                "cpu_shards": cpu_shards,
+                "gpu_shards": gpu_shards,
+                "npu_shards": npu_shards,
+            },
+            "local": {
+                "form_factor": self.profile.form_factor,
+                "contributing": contributing,
+                "blocked_by": config.policy.blocked_by(&self.conditions),
+                "cpu_cores": local_cpu_cores,
+                "accelerator_memory_mb": local_accel_mem,
+                "gflops": local_gflops,
+                "devices": self.profile.devices,
+            },
+        })
+    }
 }

@@ -62,10 +62,15 @@ Responses carry `x-darm-memories` (memories injected), `x-darm-route`
 `x-darm-memory-id`.
 
 Operations (projected by the host as MCP tools and plugin HTTP):
-`darm_status`, `darm_memory_search`, `darm_memory_store`,
+`darm_status`, `darm_resources`, `darm_memory_search`, `darm_memory_store`,
 `darm_memory_forget`, `darm_ledger_proof`, and the compute pool's
 `darm_compute_status`, `darm_compute_conditions`, `darm_compute_plan`,
-`darm_compute_receipt`, `darm_compute_tally`.
+`darm_compute_receipt`, `darm_compute_tally`. `darm_resources` reports pooled
+nodes, CPU cores, GPU/NPU devices and accelerator memory **available** vs
+**allocated** to in-flight jobs, plus this node's local contribution.
+
+New here? [`docs/QUICKSTART.md`](docs/QUICKSTART.md) covers running standalone,
+bringing your own model or token, and reading the resource view.
 
 ## Compute pool: CPUs and GPUs, servers and phones
 

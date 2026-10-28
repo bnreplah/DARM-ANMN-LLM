@@ -113,6 +113,7 @@ const STATUS_DESC: &str =
     "Compute pool: this node's CPU/GPU offer, live conditions, pool totals and sessions";
 const CONDITIONS_DESC: &str =
     "Report live device conditions (battery, charging, metered network, thermal, load)";
+const RESOURCES_DESC: &str = "Pool resources: nodes, CPU cores, GPU/NPU devices and accelerator memory available vs allocated to in-flight jobs, plus this node's local contribution";
 const PLAN_DESC: &str = "Plan a job across pooled CPUs, GPUs and NPUs with redundant replicas";
 const RECEIPT_DESC: &str = "Sign a work receipt for a shard this node computed";
 const TALLY_DESC: &str = "Verify receipts for a planned job by majority, update measurements, optionally commit to the ledger";
@@ -120,6 +121,7 @@ const TALLY_DESC: &str = "Verify receipts for a planned job by majority, update 
 pub fn manifest_entries() -> Vec<ManifestEntry> {
     vec![
         operation::<StatusArgs>("darm_compute_status", STATUS_DESC).into(),
+        operation::<StatusArgs>("darm_resources", RESOURCES_DESC).into(),
         operation::<ConditionsArgs>("darm_compute_conditions", CONDITIONS_DESC).into(),
         operation::<PlanArgs>("darm_compute_plan", PLAN_DESC).into(),
         operation::<ReceiptArgs>("darm_compute_receipt", RECEIPT_DESC).into(),
@@ -310,6 +312,18 @@ pub fn register(router: &mut OperationRouter, node: &SharedNode) {
                     "compute": node.compute.status(&node.config, now_ms()),
                     "sessions": node.sessions.status(),
                 }))
+            })
+        },
+    );
+
+    let n = Arc::clone(node);
+    router.add_json(
+        json_schema_operation::<StatusArgs>("darm_resources", RESOURCES_DESC),
+        move |_args: StatusArgs, _context| {
+            let n = Arc::clone(&n);
+            Box::pin(async move {
+                let node = n.lock().expect("darm node lock");
+                Ok(node.compute.resources(&node.config, now_ms()))
             })
         },
     );
