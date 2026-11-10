@@ -313,8 +313,16 @@ pub struct Block {
     pub header: BlockHeader,
     pub entries: Vec<SignedEntry>,
     pub proposer_signature: Signature,
+    /// The commit certificate. With `commit_round` unset these are
+    /// one-vote-per-height attestations; with it set they are precommits
+    /// from that round (see [`super::locking`]).
     #[serde(default)]
     pub attestations: Vec<Attestation>,
+    /// Round whose precommits finalized the block under lock-based BFT.
+    /// Not part of the block hash: the same block can be committed in any
+    /// round at or after the one it was proposed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_round: Option<u32>,
 }
 
 impl Block {

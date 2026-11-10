@@ -162,6 +162,8 @@ pub struct HeightVote {
     /// Verified polkas by `(round, block)`, kept so they can be relayed.
     polkas: HashMap<(u32, Hash32), Vec<Vote>>,
     decided: Option<Hash32>,
+    /// The round and precommits that decided the height.
+    certificate: Option<(u32, Vec<Vote>)>,
 }
 
 impl HeightVote {
@@ -179,6 +181,7 @@ impl HeightVote {
             votes: BTreeMap::new(),
             polkas: HashMap::new(),
             decided: None,
+            certificate: None,
         }
     }
 
@@ -209,6 +212,14 @@ impl HeightVote {
         self.decided
     }
 
+    /// The decided block with the round and precommits that decided it.
+    /// Kept so a node that learns the decision before it has the block
+    /// body can still finalize once the body arrives.
+    pub fn commit_certificate(&self) -> Option<(Hash32, u32, &[Vote])> {
+        let (round, precommits) = self.certificate.as_ref()?;
+        Some((self.decided?, *round, precommits))
+    }
+
     pub fn proposer(&self, round: u32) -> NodeId {
         self.validators.proposer_for(self.height, round)
     }
@@ -237,15 +248,10 @@ impl HeightVote {
         })
     }
 
-    /// Record a proposal. `acceptable` says whether the caller validated the
-    /// block body against ledger state; an unacceptable block gets a nil
-    /// prevote. Pass `identity` to vote, `None` to only observe.
-    pub fn on_proposal(
-        &mut self,
-        identity: Option<&NodeIdentity>,
-        proposal: Proposal,
-        acceptable: bool,
-    ) -> Result<Vec<Action>> {
+    /// Everything about a proposal that can be checked without the block:
+    /// height, round bound, proposer and signature. Callers use this before
+    /// spending memory on the block body.
+    pub fn check_proposal(&self, proposal: &Proposal) -> Result<()> {
         if proposal.height != self.height {
             return Err(DarmError::Rejected("proposal for another height".into()));
         }
@@ -269,6 +275,70 @@ impl HeightVote {
             proposal.valid_round,
         );
         proposal.proposer.verify(&message, &proposal.signature)?;
+        Ok(())
+    }
+
+    /// The proposal recorded for `round`, if any.
+    pub fn proposal(&self, round: u32) -> Option<&Proposal> {
+        self.proposals.get(&round)
+    }
+
+    /// Whether any proposal or vote has been seen for this height. An idle
+    /// chain has nothing to agree on, so callers start round timers only
+    /// once this is true or they have something to propose.
+    pub fn active(&self) -> bool {
+        !self.proposals.is_empty() || !self.votes.is_empty()
+    }
+
+    /// Replay one of this node's own persisted votes after a restart.
+    ///
+    /// Besides recording the vote (so it is never signed again), this
+    /// restores what casting it implied: a precommit for a block means the
+    /// node was locked on it, and having voted in a round means the node
+    /// had reached at least that step of that round. Without this a
+    /// restarted validator would forget its lock and could help finalize a
+    /// conflicting block.
+    pub fn restore_own_vote(&mut self, vote: Vote) -> Result<()> {
+        let (round, kind, block) = (vote.round, vote.kind, vote.block);
+        if round > self.round.saturating_add(MAX_ROUND_LOOKAHEAD) {
+            // The node itself was in this round; trust its own durable log
+            // over the lookahead bound, which exists for peers.
+            self.round = round;
+            self.step = Step::Propose;
+        }
+        self.on_vote(None, vote)?;
+        if self.decided.is_some() {
+            return Ok(());
+        }
+        let reached = match kind {
+            VoteKind::Prevote => Step::Prevote,
+            VoteKind::Precommit => Step::Precommit,
+        };
+        if round > self.round || (round == self.round && reached > self.step) {
+            self.round = round;
+            self.step = reached;
+        }
+        if let (VoteKind::Precommit, Some(block)) = (kind, block)
+            && self
+                .locked
+                .is_none_or(|(locked_round, _)| round >= locked_round)
+        {
+            self.locked = Some((round, block));
+            self.acceptable.insert(block);
+        }
+        Ok(())
+    }
+
+    /// Record a proposal. `acceptable` says whether the caller validated the
+    /// block body against ledger state; an unacceptable block gets a nil
+    /// prevote. Pass `identity` to vote, `None` to only observe.
+    pub fn on_proposal(
+        &mut self,
+        identity: Option<&NodeIdentity>,
+        proposal: Proposal,
+        acceptable: bool,
+    ) -> Result<Vec<Action>> {
+        self.check_proposal(&proposal)?;
         if let Some(existing) = self.proposals.get(&proposal.round) {
             if *existing == proposal {
                 return Ok(Vec::new());
@@ -366,6 +436,8 @@ impl HeightVote {
             )),
             _ => {
                 self.decided = Some(block);
+                self.certificate
+                    .get_or_insert_with(|| (round, precommits.to_vec()));
                 Ok(())
             }
         }
@@ -541,12 +613,13 @@ impl HeightVote {
 
     fn advance(&mut self, identity: Option<&NodeIdentity>, actions: &mut Vec<Action>) -> bool {
         if let Some((round, block)) = self.commit_quorum() {
-            let precommits = self.votes[&(round, VoteKind::Precommit)]
+            let precommits: Vec<Vote> = self.votes[&(round, VoteKind::Precommit)]
                 .values()
                 .filter(|v| v.block == Some(block))
                 .cloned()
                 .collect();
             self.decided = Some(block);
+            self.certificate = Some((round, precommits.clone()));
             actions.push(Action::Commit {
                 block,
                 round,
