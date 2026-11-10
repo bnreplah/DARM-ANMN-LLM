@@ -38,7 +38,7 @@ protocol spec for other implementations) live in the companion repository
 
 | Crate | Role |
 |---|---|
-| [`darm-core`](crates/darm-core) | Ed25519 node identities; canonical, domain-separated signing encoding; BLAKE3 Merkle trees with inclusion proofs; the memory ledger (signed entries, blocks final at >2/3 validator weight, one vote per height). |
+| [`darm-core`](crates/darm-core) | Ed25519 node identities; canonical, domain-separated signing encoding; BLAKE3 Merkle trees with inclusion proofs; the memory ledger (signed entries, blocks final at >2/3 validator weight, one vote per height); and `ledger::locking`, the lock-based BFT round machine that replaces the one-vote rule (not yet wired into the ledger or gossip). |
 | [`darm-memory`](crates/darm-memory) | Distributed associative memory: signed records, `Local`/`Mesh` scopes, decay and consolidation, hashing embedder, author-only tombstones, anti-entropy inventory, injection-hardened prompt rendering. |
 | [`darm-swarm`](crates/darm-swarm) | Biomimetic lifecycle (germinating → active → flowering → reproducing, resting, damaged/healing) driven by measured success, latency and load; pheromone field with half-life decay and ACO ranking; deterministic genomes; replication *recommendations*. |
 | [`darm-compute`](crates/darm-compute) | Compute pool over CPUs, GPUs, NPUs and phones: device profiles and live conditions, owner contribution policy, signed short-lived capability adverts (optionally proven to a mesh endpoint by the host's plugin-key binding), smooth-weighted-round-robin shard planning across CPU and GPU with replicas on distinct nodes, measurement-corrected throughput, adaptive shard sizing, signed work receipts and majority tallies that become ledger `ComputeCommit` entries. |
@@ -145,6 +145,66 @@ onion routing (Vol. 1.1 §4 flags its missing content-policy layer as the
 design's largest open gap), token settlement and staking (Vol. 1.1 §9 legal
 review items), and a measured ρ for real validators (Paper 2 §6, the
 central open experiment).
+
+## Consensus: how a block becomes final
+
+**Today, on the wire.** The proposer for `(height, round)` batches pending
+entries into a block. Validators attest to it, at most one block per height
+each. The block is final once attestations cover more than two thirds of the
+validator weight. That rule is safe, but a proposer that sends block A to
+half the validators and block B to the rest splits the vote, and since
+nobody may vote twice the height never finishes.
+
+**Lock-based BFT (`darm_core::ledger::locking`).** Implemented and tested as
+a state machine; the ledger and gossip layer still use the rule above until
+it is wired in (roadmap item 2). Each height runs rounds `0, 1, 2, ...` with
+a rotating proposer, and each round has two votes:
+
+```text
+ proposer(h, r) ──proposal──►  validators
+                                  │ prevote(block | nil)
+                                  ▼
+            >2/3 prevotes for one block in this round  = a "polka"
+                                  │ lock on it, precommit(block)
+                                  ▼
+            >2/3 precommits for it in this round        = decided
+                                  │
+          no polka / no decision ─┴─► timeout ─► round r+1, next proposer
+```
+
+- **Voting again is allowed, overturning is not.** A validator that
+  precommits a block is locked on it. In later rounds it prevotes nil for
+  anything else, unless it is shown a polka for another block from a round
+  newer than its lock. So a split vote costs one round instead of the
+  height, and a block that any honest validator decided can never lose to a
+  different one.
+- **Re-proposal.** A proposer that knows of a polka must propose that block
+  again, naming the polka's round and attaching the polka itself (the signed
+  prevotes). Locked validators verify the certificate and follow.
+- **Certificates are checked on their own.** A polka or a decision is a set
+  of signed votes carrying more than two thirds of the weight. Receivers
+  verify the set directly instead of merging it into their own tally,
+  because a Byzantine validator can show different votes to different
+  nodes. Nodes that decide relay the commit certificate.
+- **Evidence.** Two different signed votes of one kind from one validator in
+  one round are returned as an equivocation pair: proof of misbehaviour that
+  anyone can check.
+- **Bounds.** Votes are accepted only from validators, for this height, at
+  most 16 rounds ahead; one vote per validator per round and kind is kept.
+
+What it guarantees, and what it does not:
+
+| | Holds when |
+|---|---|
+| Two honest validators never decide different blocks | Under one third of the weight is faulty. Independent of timing. |
+| Every honest validator eventually decides | The above, plus messages eventually arrive within the caller's timeouts. |
+| Neither | A third or more of the weight is faulty. A test demonstrates the break with 2 of 4. |
+
+Before this is wired in, three things are required and are not done yet:
+the node must persist each vote before sending it (a validator that forgets
+its lock across a restart can be made to vote twice), blocks must carry
+their commit round so a commit certificate can be replayed, and the new
+messages need wire encodings in `spec/PROTOCOL.md`.
 
 ## Sessions: polymorphic and adaptive protocols
 

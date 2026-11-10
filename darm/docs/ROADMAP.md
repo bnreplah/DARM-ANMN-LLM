@@ -7,9 +7,19 @@ Ordered by security value first.
    plugin-key binding of DARM key to endpoint. Remaining: use the proven
    mapping to target reputation reports at the endpoints that served a
    request.
-2. **Lock-based BFT.** Upgrade the one-vote-per-height rule to
-   Tendermint/HotStuff-style locking so a Byzantine proposer that equivocates
-   cannot stall a height.
+2. **Lock-based BFT (state machine done).** `darm_core::ledger::locking`
+   implements Tendermint-style prevote/precommit rounds with locking,
+   verifiable polka and commit certificates, equivocation evidence and
+   round skipping, so an equivocating proposer costs a round instead of
+   stalling the height. Remaining, in order:
+   - persist every vote before it is sent, and replay on restart;
+   - add `commit_round` to `Block` and verify commit certificates as
+     precommits in `Ledger::commit_finalized` (legacy attestations stay
+     valid for existing blocks);
+   - gossip messages for proposals with polkas, votes and commit
+     certificates in `darm.v1`, with round timers in the plugin node;
+   - wire encodings and test vectors in DARM-ANN `spec/PROTOCOL.md`;
+   - record equivocation evidence as a ledger entry.
 3. **Validator-set governance.** `Proposal { kind: "validators" }` that, once
    passed, schedules a validator-set change at a future height.
 4. **Hybrid post-quantum signatures.** Add `Signature::Ed25519MlDsa65` (both
