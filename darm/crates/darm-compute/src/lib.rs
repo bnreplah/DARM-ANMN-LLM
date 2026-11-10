@@ -19,6 +19,10 @@
 //! - [`receipt`]: workers sign what they computed; the coordinator tallies
 //!   replicas by majority, flags dissenters, and produces a ledger
 //!   `ComputeCommit` (proof of useful work) instead of burning hashes.
+//! - [`audit`]: sampled audits. After receipts are fixed, an unpredictable
+//!   seed picks a fraction of shards to re-run and who re-runs them, so a
+//!   single-replica job can be checked for a fraction of the cost of full
+//!   redundancy.
 //! - [`sizing`]: adaptive shard sizing so a phone gets small shards and a GPU
 //!   large ones, converging on a target shard duration.
 //!
@@ -28,6 +32,7 @@
 
 pub mod admission;
 pub mod advert;
+pub mod audit;
 pub mod device;
 pub mod pool;
 pub mod receipt;

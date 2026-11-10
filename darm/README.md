@@ -119,6 +119,44 @@ both at once, and a phone can join and draw on the whole pool:
 Nothing in the pool executes remote code: workloads are named kinds that each
 operator chose to serve; DARM plans, measures and verifies.
 
+### Sampled audits: checking work without redoing all of it
+
+Redundancy verifies a job by running every shard two or three times. A
+sampled audit (`darm_compute::audit`) runs each shard once and then re-runs a
+small, unpredictable part:
+
+1. Workers return signed receipts. The coordinator tallies them and makes
+   the tally's `receipts_root` public.
+2. A beacon that nobody could predict at step 1 becomes known, for example
+   the hash of a later ledger block.
+3. `plan_audit(job, receipts_root, beacon)` picks the audited shards and one
+   auditor each. Anyone can recompute it, so neither the coordinator nor a
+   worker chooses what is checked or by whom. A shard's own workers never
+   audit it.
+4. Auditors re-run and sign; `audit_tally` compares them with the accepted
+   outputs.
+5. A contradiction goes to more auditors (`escalation`, `resolve`). A
+   majority of those auditors is needed either way; silence decides nothing.
+
+| Audit rate | Extra work | Caught if 1 shard is wrong | 10 wrong | 50 wrong |
+|---|---|---|---|---|
+| 5% | about 5% | 5% | 40% | 92% |
+| 10% | about 10% | 10% | 65% | 99.5% |
+| 20% | about 20% | 20% | 89% | over 99.99% |
+
+A worker that cheats on `k` shards is caught with probability
+`1 - (1 - rate)^k`. That is weak against a single wrong shard and strong
+against cheating at scale, which is the case that pays.
+
+Limits, stated plainly: the beacon's block proposer can bias the sample by
+trying a few candidate blocks (a verifiable random function would remove
+that, and is not implemented); auditors re-run whole shards, so this does not
+reach the roughly 1% overhead of schemes that check sampled hidden states;
+being caught currently costs reputation only, since there is no stake to
+slash; and auditors that share an operator with the worker can confirm a
+wrong result. The module is a library today: the plugin's compute operations
+do not call it yet.
+
 ## Whitepaper alignment
 
 How the DARM-ANN papers map onto this code, and at what epistemic status

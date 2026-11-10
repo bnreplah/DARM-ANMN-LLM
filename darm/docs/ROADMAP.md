@@ -50,3 +50,8 @@ Ordered by security value first.
 14. **Fabric in CI.** `darm-ci.yml` still lists only the original four
     crates; `darm-compute`, `darm-protocol` and `darm-fabric` are not yet
     gated there.
+15. **Sampled audits in the node.** `darm_compute::audit` selects and
+    settles audits from `(job, receipts_root, beacon)`. Remaining: a ledger
+    entry that publishes `receipts_root` before the beacon block, plugin
+    operations to request and collect audit receipts, feeding outcomes into
+    worker trust, and a verifiable random function for the beacon.
