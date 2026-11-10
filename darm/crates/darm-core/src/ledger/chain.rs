@@ -1,6 +1,7 @@
 use super::entry::{
     Attestation, Block, BlockHeader, SignedEntry, attestation_message, block_proposal_message,
 };
+use super::locking::{HeightVote, VoteKind, vote_message};
 use super::state::LedgerState;
 use super::validators::ChainConfig;
 use crate::{DarmError, Hash32, NodeId, NodeIdentity, Result, merkle};
@@ -47,6 +48,9 @@ pub struct Ledger {
     /// Height -> block hash this node attested to. One vote per height is the
     /// safety rule; never relax it.
     local_votes: HashMap<u64, Hash32>,
+    /// Lock-based agreement on the next height. `None` means the ledger
+    /// runs the one-vote rule above.
+    rounds: Option<HeightVote>,
 }
 
 impl Ledger {
@@ -68,6 +72,7 @@ impl Ledger {
             pending_per_author: HashMap::new(),
             candidates: HashMap::new(),
             local_votes: HashMap::new(),
+            rounds: None,
         }
     }
 
@@ -219,6 +224,7 @@ impl Ledger {
             header,
             entries: chosen,
             attestations: Vec::new(),
+            commit_round: None,
         };
         self.insert_candidate(block.clone())?;
         Ok(Some(block))
@@ -260,6 +266,7 @@ impl Ledger {
         identity: &NodeIdentity,
         block_hash: &Hash32,
     ) -> Result<(Attestation, Option<u64>)> {
+        self.require_one_vote_rule()?;
         let validator = identity.node_id();
         if !self.is_validator(&validator) {
             return Err(DarmError::Unauthorized("not a validator".into()));
@@ -292,6 +299,7 @@ impl Ledger {
         block_hash: &Hash32,
         attestation: Attestation,
     ) -> Result<Option<u64>> {
+        self.require_one_vote_rule()?;
         if !self.is_validator(&attestation.validator) {
             return Err(DarmError::Unauthorized(
                 "attestation from non-validator".into(),
@@ -357,6 +365,20 @@ impl Ledger {
         self.blocks.push(block);
         self.candidates.retain(|_, c| c.header.height > height);
         self.local_votes.retain(|h, _| *h > height);
+        if self.rounds.is_some() {
+            self.start_height_vote();
+        }
+        Ok(())
+    }
+
+    /// A validator must never sign under both rules at one height, so the
+    /// one-vote entry points are closed once locking is enabled.
+    fn require_one_vote_rule(&self) -> Result<()> {
+        if self.rounds.is_some() {
+            return Err(DarmError::Rejected(
+                "one-vote attestations are disabled under lock-based BFT".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -434,9 +456,33 @@ impl Ledger {
         Ok(state)
     }
 
+    /// Check the commit certificate. A block without `commit_round` carries
+    /// one-vote attestations; a block with it carries that round's
+    /// precommits. Both are quorums of validator signatures over this exact
+    /// block, so either finalizes it.
     fn verify_quorum(&self, block: &Block) -> Result<()> {
         let hash = block.hash();
-        let message = attestation_message(&self.chain_id, block.header.height, &hash);
+        let message = match block.commit_round {
+            None => attestation_message(&self.chain_id, block.header.height, &hash),
+            Some(round) => {
+                if round < block.header.round {
+                    return Err(DarmError::malformed(
+                        "block",
+                        "committed before the round it was proposed in",
+                    ));
+                }
+                vote_message(
+                    &self.chain_id,
+                    VoteKind::Precommit,
+                    block.header.height,
+                    round,
+                    Some(&hash),
+                )
+            }
+        };
+        if block.attestations.len() > self.config.validators.len() {
+            return Err(DarmError::LimitExceeded("commit certificate".into()));
+        }
         let mut signers = HashSet::new();
         for attestation in &block.attestations {
             if !self.is_validator(&attestation.validator) {
@@ -467,6 +513,9 @@ impl Ledger {
         }
     }
 }
+
+mod rounds;
+pub use rounds::RoundProposal;
 
 #[cfg(test)]
 mod tests;

@@ -7,7 +7,8 @@
 
 use darm_compute::SignedAdvert;
 use darm_core::Hash32;
-use darm_core::ledger::{Attestation, Block, SignedEntry};
+use darm_core::ledger::locking::Vote;
+use darm_core::ledger::{Attestation, Block, RoundProposal, SignedEntry};
 use darm_memory::{SignedMemory, SignedTombstone};
 use darm_protocol::HandshakeMsg;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub const CONTENT_TYPE: &str = "application/json";
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_IDS: usize = 512;
 pub const MAX_MEMORIES_PER_PUSH: usize = 64;
+/// A polka holds at most one prevote per validator.
+pub const MAX_POLKA_VOTES: usize = 256;
 pub const MAX_BLOCKS_PER_SYNC: usize = 32;
 /// Base64 of one Noise frame (8-byte masked nonce + up to 64 KiB).
 pub const MAX_SEALED_FRAME_CHARS: usize = (8usize + 65_535).div_ceil(3) * 4;
@@ -47,6 +50,15 @@ pub enum Wire {
     Attestation {
         block_hash: Hash32,
         attestation: Attestation,
+    },
+    /// Lock-based BFT: a round's proposal with its block and, for a
+    /// re-proposal, the polka that justifies it.
+    RoundProposal {
+        message: Box<RoundProposal>,
+    },
+    /// Lock-based BFT: one prevote or precommit.
+    RoundVote {
+        vote: Vote,
     },
     SyncRequest {
         chain: Hash32,
@@ -80,6 +92,8 @@ impl Wire {
             Self::LedgerEntry { .. } => "ledger_entry",
             Self::BlockProposal { .. } => "block_proposal",
             Self::Attestation { .. } => "attestation",
+            Self::RoundProposal { .. } => "round_proposal",
+            Self::RoundVote { .. } => "round_vote",
             Self::SyncRequest { .. } => "sync_request",
             Self::SyncBlocks { .. } => "sync_blocks",
             Self::ComputeAdvert { .. } => "compute_advert",
@@ -97,6 +111,7 @@ impl Wire {
             Self::MemoryAnnounce { ids } | Self::MemoryRequest { ids } => ids.len() <= MAX_IDS,
             Self::MemoryPush { memories } => memories.len() <= MAX_MEMORIES_PER_PUSH,
             Self::SyncBlocks { blocks } => blocks.len() <= MAX_BLOCKS_PER_SYNC,
+            Self::RoundProposal { message } => message.polka.len() <= MAX_POLKA_VOTES,
             Self::Sealed { frame } => frame.len() <= MAX_SEALED_FRAME_CHARS,
             _ => true,
         };

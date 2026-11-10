@@ -14,9 +14,9 @@
 //! alone a Byzantine proposer that equivocates can stall a height (votes
 //! split). [`locking`] is the lock-based replacement for that rule: prevote
 //! and precommit rounds in which validators may vote again in a later round
-//! without ever being able to finalize two blocks. It is implemented and
-//! tested as a state machine; [`Ledger`] and the gossip layer do not use it
-//! yet (see `darm/docs/ROADMAP.md`).
+//! without ever being able to finalize two blocks. A ledger switches to it
+//! with [`Ledger::enable_locking`]; blocks it finalizes carry their
+//! `commit_round` and that round's precommits as the commit certificate.
 
 mod chain;
 mod entry;
@@ -25,7 +25,7 @@ mod state;
 pub mod store;
 mod validators;
 
-pub use chain::{Ledger, LedgerLimits};
+pub use chain::{Ledger, LedgerLimits, RoundProposal};
 pub use entry::{
     Attestation, Block, BlockHeader, EntryBody, LedgerEntry, MAX_COMPUTE_SHARDS, SignedEntry,
     attestation_message, block_proposal_message,

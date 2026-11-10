@@ -653,3 +653,290 @@ fn global_rate_limit_stops_rotating_spoofed_sources() {
     assert!(admitted <= 2_000, "global bucket caps a burst: {admitted}");
     assert!(target.counters.gossip_rate_limited >= 3_000);
 }
+
+// ----- lock-based BFT ---------------------------------------------------
+
+fn locking_config(validators: &[u8]) -> DarmConfig {
+    DarmConfig {
+        consensus: crate::config::ConsensusMode::Locking,
+        ..validator_config(validators, true)
+    }
+}
+
+/// Like `pump`, but nodes in `offline` neither send nor receive.
+fn pump_live(
+    nodes: &mut [DarmNode],
+    mut queue: Vec<(usize, Outbound)>,
+    now: u64,
+    offline: &[usize],
+) {
+    let names: Vec<String> = (0..nodes.len()).map(|i| format!("peer{i}")).collect();
+    let mut steps = 0;
+    while let Some((from, outbound)) = queue.pop() {
+        steps += 1;
+        assert!(steps < 20_000, "gossip did not converge");
+        if offline.contains(&from) {
+            continue;
+        }
+        let targets: Vec<usize> = if outbound.target.is_empty() {
+            (0..nodes.len()).filter(|i| *i != from).collect()
+        } else {
+            vec![names.iter().position(|n| *n == outbound.target).unwrap()]
+        };
+        for target in targets {
+            if offline.contains(&target) {
+                continue;
+            }
+            let body = serde_json::to_vec(&outbound.message).unwrap();
+            let message = Wire::decode(&body).unwrap();
+            for reply in nodes[target].handle(&names[from], message, now) {
+                queue.push((target, reply));
+            }
+        }
+    }
+}
+
+fn tick_all(nodes: &mut [DarmNode], now: u64, offline: &[usize]) {
+    let mut queue = Vec::new();
+    for (i, n) in nodes.iter_mut().enumerate() {
+        if !offline.contains(&i) {
+            queue.extend(n.tick(now).into_iter().map(|o| (i, o)));
+        }
+    }
+    pump_live(nodes, queue, now, offline);
+}
+
+#[test]
+fn locking_validators_finalize_over_gossip() {
+    let config = locking_config(&[1, 2, 3, 4]);
+    let mut nodes: Vec<DarmNode> = (1..=4).map(|s| node(s, config.clone())).collect();
+    let (id, out) = nodes[0]
+        .remember_exchange(
+            "deploy steps?",
+            "use the k8s manifests",
+            "m",
+            "default",
+            NOW,
+        )
+        .unwrap();
+    pump_live(
+        &mut nodes,
+        out.into_iter().map(|o| (0, o)).collect(),
+        NOW,
+        &[],
+    );
+    for t in 0..=6 {
+        tick_all(&mut nodes, NOW + t, &[]);
+    }
+    let head = nodes[0].ledger().head_hash();
+    assert!(nodes[0].ledger().height() >= 1);
+    for n in &nodes {
+        assert_eq!(n.ledger().head_hash(), head, "replicas agree");
+        assert!(n.ledger().state().is_committed(&id));
+        assert_eq!(n.ledger().pending_len(), 0);
+        for block in n.ledger().blocks() {
+            assert!(block.commit_round.is_some(), "finalized by precommits");
+        }
+        assert_eq!(n.counters.equivocations, 0);
+    }
+    assert_eq!(nodes[1].ledger().state().registrations().count(), 4);
+    // The chain replays from its certificates alone.
+    Ledger::replay(
+        nodes[0].ledger().config().clone(),
+        nodes[0].ledger().blocks().to_vec(),
+    )
+    .unwrap();
+    // Idle chain: no pending entries, so rounds do not advance with time.
+    tick_all(&mut nodes, NOW + 10 * ROUND_TIMEOUT_MS, &[]);
+    tick_all(&mut nodes, NOW + 30 * ROUND_TIMEOUT_MS, &[]);
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n.ledger().locking().unwrap().round() == 0)
+    );
+}
+
+#[test]
+fn locking_survives_an_offline_proposer() {
+    let config = locking_config(&[1, 2, 3, 4]);
+    let mut nodes: Vec<DarmNode> = (1..=4).map(|s| node(s, config.clone())).collect();
+    let first = nodes[0].ledger().locking().unwrap().proposer(0);
+    let offline = [nodes.iter().position(|n| n.node_id() == first).unwrap()];
+    let live = (0..4).find(|i| !offline.contains(i)).unwrap();
+    let (id, out) = nodes[live]
+        .remember_exchange("q", "a", "m", "default", NOW)
+        .unwrap();
+    pump_live(
+        &mut nodes,
+        out.into_iter().map(|o| (live, o)).collect(),
+        NOW,
+        &offline,
+    );
+
+    // Nothing can finalize in round 0. Time passes; timers move the live
+    // validators to a round with a live proposer.
+    let mut now = NOW;
+    for _ in 0..40 {
+        tick_all(&mut nodes, now, &offline);
+        if nodes[live].ledger().state().is_committed(&id) {
+            break;
+        }
+        now += ROUND_TIMEOUT_MS / 2 + 1;
+    }
+    let head = nodes[live].ledger().head_hash();
+    for (i, n) in nodes.iter().enumerate() {
+        if offline.contains(&i) {
+            assert_eq!(n.ledger().height(), 0);
+            continue;
+        }
+        assert!(n.ledger().state().is_committed(&id), "node {i} finalized");
+        assert_eq!(n.ledger().head_hash(), head);
+        assert!(n.ledger().block(1).unwrap().commit_round >= Some(1));
+    }
+
+    // The node that was offline catches up from certified blocks alone.
+    tick_all(&mut nodes, now + 1, &[]);
+    let request = Outbound::to(
+        "peer0",
+        Wire::SyncRequest {
+            chain: nodes[live].ledger().chain_id(),
+            from_height: 0,
+        },
+    );
+    let replies: Vec<(usize, Outbound)> = nodes[live]
+        .handle(&format!("peer{}", offline[0]), request.message, now + 1)
+        .into_iter()
+        .map(|o| (live, o))
+        .collect();
+    pump_live(&mut nodes, replies, now + 1, &[]);
+    assert_eq!(
+        nodes[offline[0]].ledger().head_hash(),
+        nodes[live].ledger().head_hash()
+    );
+}
+
+#[test]
+fn single_locking_validator_finalizes_alone() {
+    let config = DarmConfig {
+        consensus: crate::config::ConsensusMode::Locking,
+        ..validator_config(&[1], true)
+    };
+    let mut n = node(1, config);
+    let (id, _) = n.remember_exchange("q", "a", "m", "default", NOW).unwrap();
+    n.tick(NOW);
+    assert!(n.ledger().state().is_committed(&id));
+    assert_eq!(n.ledger().block(1).unwrap().commit_round, Some(0));
+}
+
+#[test]
+fn locking_votes_are_durable_before_they_are_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    // First open creates the identity; then make that node a validator.
+    let me = DarmNode::open(
+        DarmConfig {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..DarmConfig::default()
+        },
+        NOW,
+    )
+    .unwrap()
+    .node_id();
+    let mut config = locking_config(&[1, 2, 3]);
+    config.validators.push(me);
+    let persistent = DarmConfig {
+        data_dir: Some(dir.path().to_path_buf()),
+        ..config.clone()
+    };
+    let is_vote = |o: &Outbound| matches!(o.message, Wire::RoundVote { .. });
+    let vote_files = || -> usize {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("votes-"))
+            .map(|e| std::fs::read_to_string(e.path()).unwrap().lines().count())
+            .sum()
+    };
+
+    let mut node_p = DarmNode::open(persistent.clone(), NOW).unwrap();
+    let proposer = node_p.ledger().locking().unwrap().proposer(0);
+    // Obtain a round-0 proposal: from this node if it is the proposer,
+    // otherwise from the validator that is.
+    let (proposal, sent): (Option<Wire>, Vec<Outbound>) = if proposer == me {
+        node_p
+            .remember_exchange("q", "a", "m", "default", NOW)
+            .unwrap();
+        (None, node_p.tick(NOW))
+    } else {
+        let seed = (1..=3)
+            .find(|s| identity(*s).node_id() == proposer)
+            .unwrap();
+        let mut other = node(seed, config.clone());
+        other
+            .remember_exchange("q", "a", "m", "default", NOW)
+            .unwrap();
+        let wire = other
+            .tick(NOW)
+            .into_iter()
+            .map(|o| o.message)
+            .find(|m| matches!(m, Wire::RoundProposal { .. }))
+            .expect("the proposer proposes");
+        let sent = node_p.handle("peer1", wire.clone(), NOW);
+        (Some(wire), sent)
+    };
+    assert_eq!(
+        sent.iter().filter(|o| is_vote(o)).count(),
+        1,
+        "one prevote sent"
+    );
+    assert_eq!(vote_files(), 1, "and it is on disk");
+
+    // Restart mid-round.
+    drop(node_p);
+    let mut node_p = DarmNode::open(persistent, NOW + 1).unwrap();
+    let rounds = node_p.ledger().locking().unwrap();
+    assert_eq!((rounds.round(), rounds.step()), (0, Step::Prevote));
+    // It neither votes again nor proposes again for that round.
+    let again = match proposal {
+        Some(wire) => node_p.handle("peer1", wire, NOW + 1),
+        None => node_p.tick(NOW + 1),
+    };
+    assert!(!again.iter().any(is_vote));
+    assert!(
+        !again
+            .iter()
+            .any(|o| matches!(o.message, Wire::RoundProposal { .. }))
+    );
+    assert_eq!(vote_files(), 1);
+}
+
+#[test]
+fn one_vote_and_locking_nodes_ignore_each_others_messages() {
+    let mut locking = node(1, locking_config(&[1, 2, 3, 4]));
+    let mut one_vote = node(2, validator_config(&[1, 2, 3, 4], true));
+    locking
+        .remember_exchange("q", "a", "m", "default", NOW)
+        .unwrap();
+    one_vote
+        .remember_exchange("q", "a", "m", "default", NOW)
+        .unwrap();
+    for message in one_vote.tick(NOW).into_iter().map(|o| o.message) {
+        let replies = locking.handle("peer1", message, NOW);
+        assert!(
+            !replies
+                .iter()
+                .any(|o| matches!(o.message, Wire::Attestation { .. }))
+        );
+    }
+    for message in locking.tick(NOW).into_iter().map(|o| o.message) {
+        let replies = one_vote.handle("peer0", message, NOW);
+        assert!(
+            !replies
+                .iter()
+                .any(|o| matches!(o.message, Wire::RoundVote { .. }))
+        );
+    }
+    assert_eq!(
+        (locking.ledger().height(), one_vote.ledger().height()),
+        (0, 0)
+    );
+}

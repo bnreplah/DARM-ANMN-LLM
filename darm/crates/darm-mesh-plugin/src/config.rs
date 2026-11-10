@@ -9,6 +9,32 @@ use darm_compute::{ContributionPolicy, Device, FormFactor, Threshold, WorkloadKi
 use darm_core::{DarmError, NodeId, Result};
 use std::path::PathBuf;
 
+/// Which rule finalizes ledger blocks. Every validator of a chain must use
+/// the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsensusMode {
+    /// One attestation per height. Safe, but an equivocating proposer can
+    /// stall a height.
+    OneVote,
+    /// Lock-based BFT rounds (prevote, precommit, locks). An equivocating
+    /// proposer costs a round. Validators need a data directory so their
+    /// votes survive a restart.
+    Locking,
+}
+
+impl ConsensusMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "one-vote" | "one_vote" | "legacy" => Ok(Self::OneVote),
+            "locking" | "bft" => Ok(Self::Locking),
+            other => Err(DarmError::Rejected(format!(
+                "DARM_CONSENSUS must be one-vote|locking, got {other:?}"
+            ))),
+        }
+    }
+}
+
 /// Whether gossip runs inside authenticated Noise sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +103,7 @@ pub struct DarmConfig {
     /// Start in a metered-network state (phones on cellular).
     pub metered: bool,
     pub sessions: SessionMode,
+    pub consensus: ConsensusMode,
     /// New-node weight ramp for the compute pool (Volume 1 §11 VoteWeight).
     pub pool_min_age_ms: u64,
     /// Default CDCP admission threshold τ_c for compute results.
@@ -110,6 +137,7 @@ impl Default for DarmConfig {
             policy: ContributionPolicy::for_form_factor(FormFactor::Server),
             metered: false,
             sessions: SessionMode::Preferred,
+            consensus: ConsensusMode::OneVote,
             pool_min_age_ms: darm_compute::pool::DEFAULT_MIN_AGE_MS,
             admission_threshold: Threshold::TWO_THIRDS,
             assumed_p_node: 0.01,
@@ -270,6 +298,10 @@ impl DarmConfig {
                 Ok(value) => SessionMode::parse(&value)?,
                 Err(_) => defaults.sessions,
             },
+            consensus: match std::env::var("DARM_CONSENSUS") {
+                Ok(value) => ConsensusMode::parse(&value)?,
+                Err(_) => defaults.consensus,
+            },
             pool_min_age_ms: number("DARM_POOL_MIN_AGE_MS", defaults.pool_min_age_ms),
             admission_threshold: match std::env::var("DARM_ADMISSION_THRESHOLD") {
                 Ok(value) => parse_threshold(&value)?,
@@ -329,6 +361,16 @@ mod tests {
         );
         assert_eq!(SessionMode::parse("off").unwrap(), SessionMode::Off);
         assert!(SessionMode::parse("maybe").is_err());
+        assert_eq!(
+            ConsensusMode::parse("Locking").unwrap(),
+            ConsensusMode::Locking
+        );
+        assert_eq!(
+            ConsensusMode::parse("one-vote").unwrap(),
+            ConsensusMode::OneVote
+        );
+        assert!(ConsensusMode::parse("fast").is_err());
+        assert_eq!(DarmConfig::default().consensus, ConsensusMode::OneVote);
     }
 
     #[test]

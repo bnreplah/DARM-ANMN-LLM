@@ -38,7 +38,7 @@ protocol spec for other implementations) live in the companion repository
 
 | Crate | Role |
 |---|---|
-| [`darm-core`](crates/darm-core) | Ed25519 node identities; canonical, domain-separated signing encoding; BLAKE3 Merkle trees with inclusion proofs; the memory ledger (signed entries, blocks final at >2/3 validator weight, one vote per height); and `ledger::locking`, the lock-based BFT round machine that replaces the one-vote rule (not yet wired into the ledger or gossip). |
+| [`darm-core`](crates/darm-core) | Ed25519 node identities; canonical, domain-separated signing encoding; BLAKE3 Merkle trees with inclusion proofs; the memory ledger (signed entries, blocks final at >2/3 validator weight, one vote per height); and lock-based BFT rounds (`ledger::locking`), an opt-in replacement for the one-vote rule (`DARM_CONSENSUS=locking`). |
 | [`darm-memory`](crates/darm-memory) | Distributed associative memory: signed records, `Local`/`Mesh` scopes, decay and consolidation, hashing embedder, author-only tombstones, anti-entropy inventory, injection-hardened prompt rendering. |
 | [`darm-swarm`](crates/darm-swarm) | Biomimetic lifecycle (germinating → active → flowering → reproducing, resting, damaged/healing) driven by measured success, latency and load; pheromone field with half-life decay and ACO ranking; deterministic genomes; replication *recommendations*. |
 | [`darm-compute`](crates/darm-compute) | Compute pool over CPUs, GPUs, NPUs and phones: device profiles and live conditions, owner contribution policy, signed short-lived capability adverts (optionally proven to a mesh endpoint by the host's plugin-key binding), smooth-weighted-round-robin shard planning across CPU and GPU with replicas on distinct nodes, measurement-corrected throughput, adaptive shard sizing, signed work receipts and majority tallies that become ledger `ComputeCommit` entries. |
@@ -148,17 +148,18 @@ central open experiment).
 
 ## Consensus: how a block becomes final
 
-**Today, on the wire.** The proposer for `(height, round)` batches pending
-entries into a block. Validators attest to it, at most one block per height
-each. The block is final once attestations cover more than two thirds of the
-validator weight. That rule is safe, but a proposer that sends block A to
-half the validators and block B to the rest splits the vote, and since
-nobody may vote twice the height never finishes.
+Two rules are implemented. A chain uses one; every validator must use the
+same one. `DARM_CONSENSUS` selects it.
 
-**Lock-based BFT (`darm_core::ledger::locking`).** Implemented and tested as
-a state machine; the ledger and gossip layer still use the rule above until
-it is wired in (roadmap item 2). Each height runs rounds `0, 1, 2, ...` with
-a rotating proposer, and each round has two votes:
+**One vote (`DARM_CONSENSUS=one-vote`, the default).** The proposer for
+`(height, round)` batches pending entries into a block. Validators attest to
+it, at most one block per height each. The block is final once attestations
+cover more than two thirds of the validator weight. That rule is safe, but a
+proposer that sends block A to half the validators and block B to the rest
+splits the vote, and since nobody may vote twice the height never finishes.
+
+**Lock-based BFT (`DARM_CONSENSUS=locking`).** Each height runs rounds
+`0, 1, 2, ...` with a rotating proposer, and each round has two votes:
 
 ```text
  proposer(h, r) ──proposal──►  validators
@@ -200,11 +201,35 @@ What it guarantees, and what it does not:
 | Every honest validator eventually decides | The above, plus messages eventually arrive within the caller's timeouts. |
 | Neither | A third or more of the weight is faulty. A test demonstrates the break with 2 of 4. |
 
-Before this is wired in, three things are required and are not done yet:
-the node must persist each vote before sending it (a validator that forgets
-its lock across a restart can be made to vote twice), blocks must carry
-their commit round so a commit certificate can be replayed, and the new
-messages need wire encodings in `spec/PROTOCOL.md`.
+How the node runs it:
+
+- **Messages.** `round_proposal` (the signed proposal, its block and, for a
+  re-proposal, the polka) and `round_vote` travel on `darm.v1`. A finalized
+  block is relayed with its commit certificate, so a node that missed the
+  votes, or was shown different ones, verifies the decision on its own.
+- **The block records how it was decided.** `commit_round` plus that
+  round's precommits are the commit certificate, checked on gossip, sync
+  and replay. Blocks finalized under the one-vote rule remain valid
+  history.
+- **Durable votes.** Every vote is written to `votes-<chain>.jsonl` in the data
+  directory and synced to disk before it is sent. On restart the node
+  restores its lock and will not sign a second vote for a round. A
+  validator without a data directory logs a warning: it must not be
+  restarted in the middle of a height.
+- **Timers.** A round's timer runs only while there is something to agree
+  on, and later rounds wait longer (`ROUND_TIMEOUT_MS x (round + 1)`), so
+  an idle chain does not burn through rounds and a slow network eventually
+  gets a round that is long enough.
+- **Equivocation** is counted in `darm_status` and logged. It is not yet
+  written to the ledger as slashable evidence.
+
+Switching an existing chain: stop every validator, set
+`DARM_CONSENSUS=locking` on all of them, and start them again. Do not switch
+while a block is being voted on, and do not run a mixed set: a validator that
+signs under both rules at one height counts toward two different quorums.
+Nodes on different rules ignore each other's consensus messages. The DARM-ANN
+archive server must be on a `darm-core` revision that includes this change
+before it can verify blocks finalized by lock-based BFT.
 
 ## Sessions: polymorphic and adaptive protocols
 
@@ -242,6 +267,7 @@ handshake with each peer and seals gossip to peers that completed one:
 | `DARM_PROPOSE_REPLICATION` | `0` | Submit `replicate` ledger proposals when the swarm policy recommends it. |
 | `DARM_RECALL_TOP_K` / `DARM_RECALL_BUDGET_CHARS` | 5 / 4000 | Memory injection size. |
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
+| `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |

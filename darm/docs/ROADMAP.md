@@ -7,19 +7,17 @@ Ordered by security value first.
    plugin-key binding of DARM key to endpoint. Remaining: use the proven
    mapping to target reputation reports at the endpoints that served a
    request.
-2. **Lock-based BFT (state machine done).** `darm_core::ledger::locking`
-   implements Tendermint-style prevote/precommit rounds with locking,
-   verifiable polka and commit certificates, equivocation evidence and
-   round skipping, so an equivocating proposer costs a round instead of
-   stalling the height. Remaining, in order:
-   - persist every vote before it is sent, and replay on restart;
-   - add `commit_round` to `Block` and verify commit certificates as
-     precommits in `Ledger::commit_finalized` (legacy attestations stay
-     valid for existing blocks);
-   - gossip messages for proposals with polkas, votes and commit
-     certificates in `darm.v1`, with round timers in the plugin node;
-   - wire encodings and test vectors in DARM-ANN `spec/PROTOCOL.md`;
-   - record equivocation evidence as a ledger entry.
+2. **Lock-based BFT (wired, opt-in).** `DARM_CONSENSUS=locking` finalizes
+   blocks by Tendermint-style prevote/precommit rounds with locking, durable
+   votes, and commit certificates carried in the block, so an equivocating
+   proposer costs a round instead of stalling the height. Remaining:
+   - wire encodings and test vectors for `round_proposal`, `round_vote` and
+     `commit_round` in DARM-ANN `spec/PROTOCOL.md`, and re-pin the archive
+     server's `darm-core` so it can verify these blocks;
+   - record equivocation evidence as a ledger entry;
+   - make `locking` the default once the above has run on a real mesh;
+   - a chain-level activation height, so a switch cannot be done
+     inconsistently by operators.
 3. **Validator-set governance.** `Proposal { kind: "validators" }` that, once
    passed, schedules a validator-set change at a future height.
 4. **Hybrid post-quantum signatures.** Add `Signature::Ed25519MlDsa65` (both
