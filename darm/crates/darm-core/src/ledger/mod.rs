@@ -10,12 +10,17 @@
 //! both finalize.
 //!
 //! Liveness: the proposer for `(height, round)` rotates, so an offline
-//! proposer is skipped by moving to the next round. A Byzantine proposer that
-//! equivocates can stall a height (votes split); full lock-based BFT
-//! (Tendermint/HotStuff style) is on the roadmap in `darm/docs/ROADMAP.md`.
+//! proposer is skipped by moving to the next round. Under the one-vote rule
+//! alone a Byzantine proposer that equivocates can stall a height (votes
+//! split). [`locking`] is the lock-based replacement for that rule: prevote
+//! and precommit rounds in which validators may vote again in a later round
+//! without ever being able to finalize two blocks. It is implemented and
+//! tested as a state machine; [`Ledger`] and the gossip layer do not use it
+//! yet (see `darm/docs/ROADMAP.md`).
 
 mod chain;
 mod entry;
+pub mod locking;
 mod state;
 pub mod store;
 mod validators;
