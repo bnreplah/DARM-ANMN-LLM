@@ -2357,6 +2357,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "darm-fabric"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "darm-core",
+ "darm-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "darm-memory"
 version = "0.1.0"
 dependencies = [
