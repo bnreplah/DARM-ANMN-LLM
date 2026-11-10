@@ -5,9 +5,11 @@
 //! attestation carries its own Ed25519 signature and is verified on receipt.
 //! Messages are bounded before and after parsing.
 
+use darm_compute::SignedAdvert;
 use darm_core::Hash32;
 use darm_core::ledger::{Attestation, Block, SignedEntry};
 use darm_memory::{SignedMemory, SignedTombstone};
+use darm_protocol::HandshakeMsg;
 use serde::{Deserialize, Serialize};
 
 pub const CHANNEL: &str = "darm.v1";
@@ -17,6 +19,8 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_IDS: usize = 512;
 pub const MAX_MEMORIES_PER_PUSH: usize = 64;
 pub const MAX_BLOCKS_PER_SYNC: usize = 32;
+/// Base64 of one Noise frame (8-byte masked nonce + up to 64 KiB).
+pub const MAX_SEALED_FRAME_CHARS: usize = (8usize + 65_535).div_ceil(3) * 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -51,6 +55,19 @@ pub enum Wire {
     SyncBlocks {
         blocks: Vec<Block>,
     },
+    /// What this node offers to the compute pool (CPU/GPU/NPU).
+    ComputeAdvert {
+        advert: SignedAdvert,
+    },
+    /// Noise session handshake (the only plaintext allowed when sessions
+    /// are required).
+    Handshake {
+        handshake: HandshakeMsg,
+    },
+    /// One sealed session frame carrying another `Wire` message.
+    Sealed {
+        frame: String,
+    },
 }
 
 impl Wire {
@@ -65,6 +82,9 @@ impl Wire {
             Self::Attestation { .. } => "attestation",
             Self::SyncRequest { .. } => "sync_request",
             Self::SyncBlocks { .. } => "sync_blocks",
+            Self::ComputeAdvert { .. } => "compute_advert",
+            Self::Handshake { .. } => "handshake",
+            Self::Sealed { .. } => "sealed",
         }
     }
 
@@ -77,12 +97,18 @@ impl Wire {
             Self::MemoryAnnounce { ids } | Self::MemoryRequest { ids } => ids.len() <= MAX_IDS,
             Self::MemoryPush { memories } => memories.len() <= MAX_MEMORIES_PER_PUSH,
             Self::SyncBlocks { blocks } => blocks.len() <= MAX_BLOCKS_PER_SYNC,
+            Self::Sealed { frame } => frame.len() <= MAX_SEALED_FRAME_CHARS,
             _ => true,
         };
         if !within {
             return Err(format!("{} exceeds item limit", message.kind()));
         }
         Ok(message)
+    }
+
+    /// Messages that may never travel inside a sealed frame.
+    pub fn is_session_control(&self) -> bool {
+        matches!(self, Self::Handshake { .. } | Self::Sealed { .. })
     }
 }
 

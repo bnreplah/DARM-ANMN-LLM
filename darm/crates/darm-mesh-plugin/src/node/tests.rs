@@ -109,6 +109,51 @@ fn three_validators_converge_over_gossip() {
 }
 
 #[test]
+fn attestations_arriving_before_their_block_still_count() {
+    let config = validator_config(&[1, 2, 3], false);
+    let mut nodes: Vec<DarmNode> = (1..=3).map(|s| node(s, config.clone())).collect();
+    // Registrations everywhere, then find who proposes height 1.
+    let mut entries = Vec::new();
+    for (i, n) in nodes.iter_mut().enumerate() {
+        entries.extend(n.tick(NOW).into_iter().map(|o| (i, o)));
+    }
+    let proposals: Vec<(usize, Outbound)> = entries
+        .iter()
+        .filter(|(_, o)| matches!(o.message, Wire::BlockProposal { .. }))
+        .cloned()
+        .collect();
+    let ledger_entries: Vec<(usize, Outbound)> = entries
+        .into_iter()
+        .filter(|(_, o)| matches!(o.message, Wire::LedgerEntry { .. }))
+        .collect();
+    // The height-1 proposer always has at least its own registration.
+    let (proposer, proposal) = proposals.into_iter().next().expect("a proposal");
+    let others: Vec<usize> = (0..3).filter(|i| *i != proposer).collect();
+    let (a, b) = (others[0], others[1]);
+    for (from, o) in &ledger_entries {
+        for (to, n) in nodes.iter_mut().enumerate() {
+            if to != *from {
+                n.handle(&format!("peer{from}"), o.message.clone(), NOW);
+            }
+        }
+    }
+    // `a` sees the proposal and attests; `b` gets that attestation first.
+    let replies = nodes[a].handle(&format!("peer{proposer}"), proposal.message.clone(), NOW);
+    let attestation = replies
+        .into_iter()
+        .find(|o| matches!(o.message, Wire::Attestation { .. }))
+        .expect("validator attests");
+    nodes[b].handle(&format!("peer{a}"), attestation.message, NOW);
+    assert_eq!(nodes[b].ledger().height(), 0);
+    nodes[b].handle(&format!("peer{proposer}"), proposal.message, NOW);
+    assert_eq!(
+        nodes[b].ledger().height(),
+        1,
+        "buffered attestation completed quorum"
+    );
+}
+
+#[test]
 fn late_joiner_syncs_history() {
     let config = validator_config(&[1, 2], true);
     let mut nodes = vec![node(1, config.clone()), node(2, config.clone())];
@@ -125,7 +170,7 @@ fn late_joiner_syncs_history() {
     assert!(nodes[0].ledger().height() >= 1);
     // An observer (not a validator) joins later and catches up from peer0.
     nodes.push(node(7, config));
-    let request = nodes[2].on_peer_up("peer0");
+    let request = nodes[2].on_peer_up("peer0", NOW);
     pump(
         &mut nodes,
         request.into_iter().map(|o| (2, o)).collect(),
@@ -150,7 +195,13 @@ fn private_memories_never_leave_the_node() {
         .remember_exchange("my password hint", "nope", "m", "default", NOW)
         .unwrap();
     assert!(out.is_empty());
-    assert!(nodes[0].tick(NOW).is_empty());
+    // Only the compute advert (no memory content) may leave on a tick.
+    assert!(
+        nodes[0]
+            .tick(NOW)
+            .iter()
+            .all(|o| matches!(o.message, Wire::ComputeAdvert { .. }))
+    );
     // Even if asked directly, a non-sharing node exports nothing.
     let replies = nodes[0].handle("peer1", Wire::MemoryRequest { ids: vec![id] }, NOW);
     assert!(replies.is_empty());
@@ -295,4 +346,310 @@ fn replication_is_only_proposed_when_enabled() {
             .iter()
             .any(|p| p["kind"] == "replicate")
     );
+}
+
+/// Introduce every node to every other (mesh `PeerUp`) and run the gossip,
+/// which includes the session handshakes.
+fn connect(nodes: &mut [DarmNode], now: u64) {
+    let mut queue = Vec::new();
+    for i in 0..nodes.len() {
+        for j in 0..nodes.len() {
+            if i != j {
+                for out in nodes[i].on_peer_up(&format!("peer{j}"), now) {
+                    queue.push((i, out));
+                }
+            }
+        }
+    }
+    pump(nodes, queue, now);
+}
+
+#[test]
+fn sessions_seal_gossip_between_proven_identities() {
+    let config = validator_config(&[1, 2, 3], true);
+    let mut nodes: Vec<DarmNode> = (1..=3).map(|s| node(s, config.clone())).collect();
+    connect(&mut nodes, NOW);
+    for (i, node) in nodes.iter().enumerate() {
+        for j in 0..3 {
+            if i != j {
+                assert_eq!(
+                    node.sessions.session_peer(&format!("peer{j}")),
+                    Some(identity(j as u8 + 1).node_id()),
+                    "node {i} proved peer {j}'s DARM identity"
+                );
+            }
+        }
+    }
+    let (id, out) = nodes[0]
+        .remember_exchange("where are the runbooks?", "in ops/", "m", "default", NOW)
+        .unwrap();
+    let out = nodes[0].finalize(out, NOW);
+    assert!(!out.is_empty());
+    assert!(
+        out.iter()
+            .all(|o| matches!(o.message, Wire::Sealed { .. }) && !o.target.is_empty()),
+        "with sessions to every peer, broadcasts become sealed unicasts"
+    );
+    // Nothing readable on the wire.
+    for o in &out {
+        let body = serde_json::to_string(&o.message).unwrap();
+        assert!(!body.contains("runbooks"));
+    }
+    pump(&mut nodes, out.into_iter().map(|o| (0, o)).collect(), NOW);
+    for t in 1..=5 {
+        let mut queue = Vec::new();
+        for (i, n) in nodes.iter_mut().enumerate() {
+            queue.extend(n.tick(NOW + t).into_iter().map(|o| (i, o)));
+        }
+        pump(&mut nodes, queue, NOW + t);
+    }
+    for node in &nodes {
+        assert!(node.memory().get(&id).is_some());
+        assert!(node.ledger().state().is_committed(&id));
+    }
+    assert!(nodes[1].counters.sealed_received > 0);
+}
+
+#[test]
+fn required_sessions_refuse_plaintext_and_public_meshes_require_them() {
+    let mut strict = node(
+        1,
+        DarmConfig {
+            share: true,
+            sessions: SessionMode::Required,
+            ..DarmConfig::default()
+        },
+    );
+    let replies = strict.handle(
+        "peer9",
+        Wire::MemoryAnnounce {
+            ids: vec![Hash32::ZERO],
+        },
+        NOW,
+    );
+    assert!(replies.is_empty());
+    assert_eq!(strict.counters.plaintext_refused, 1);
+    // Without a session, targeted plaintext is dropped rather than leaked.
+    let out = strict.finalize(
+        vec![Outbound::to("peer9", Wire::MemoryRequest { ids: vec![] })],
+        NOW,
+    );
+    assert!(out.is_empty());
+
+    let mut public = node(2, DarmConfig::default());
+    public.set_public_mesh(true);
+    assert_eq!(public.sessions.mode, SessionMode::Required);
+    let mut off = node(
+        3,
+        DarmConfig {
+            sessions: SessionMode::Off,
+            ..DarmConfig::default()
+        },
+    );
+    off.set_public_mesh(true);
+    assert_eq!(
+        off.sessions.mode,
+        SessionMode::Off,
+        "explicit off is respected"
+    );
+}
+
+#[test]
+fn separate_chains_do_not_share_sessions_or_pools() {
+    let mut nodes = vec![
+        node(1, validator_config(&[1], false)),
+        node(
+            2,
+            DarmConfig {
+                chain_name: Some("another-mesh".into()),
+                ..DarmConfig::default()
+            },
+        ),
+    ];
+    for node in &mut nodes {
+        node.tick(NOW);
+    }
+    connect(&mut nodes, NOW);
+    assert_eq!(nodes[0].sessions.session_peer("peer1"), None);
+    assert_eq!(nodes[0].compute.pool.summary(NOW).nodes, 1);
+}
+
+#[test]
+fn cpus_and_gpus_pool_across_nodes_and_results_reach_the_ledger() {
+    let gpu = darm_compute::Device::parse_gpu("cuda:24576:1280").unwrap();
+    // Ramp disabled: this test is about pooling, not new-node weighting.
+    let base = DarmConfig {
+        pool_min_age_ms: 0,
+        ..DarmConfig::default()
+    };
+    let configs = [
+        base.clone(),
+        base.clone(),
+        DarmConfig {
+            gpus: vec![gpu],
+            ..base
+        },
+    ];
+    let mut nodes: Vec<DarmNode> = configs
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| node(i as u8 + 1, c))
+        .collect();
+    // First ticks sign adverts; connecting delivers them (sealed).
+    for node in &mut nodes {
+        node.tick(NOW);
+    }
+    connect(&mut nodes, NOW);
+    for node in &nodes {
+        let summary = node.compute.pool.summary(NOW);
+        assert_eq!(summary.nodes, 3, "every node sees the whole pool");
+        assert_eq!(summary.gpu_devices, 1);
+        assert_eq!(summary.cpu_devices, 3);
+    }
+
+    let coordinator = nodes[0].node_id();
+    let spec = darm_compute::JobSpec {
+        workload: darm_compute::WorkloadKind::Embedding,
+        device: darm_compute::DevicePreference::Any,
+        inputs: (0..6u8).map(|i| Hash32::digest("in", &[i])).collect(),
+        redundancy: 3,
+        min_memory_mb: 0,
+        allow_mobile: false,
+        same_kind_replicas: false,
+        threshold: darm_compute::Threshold::TWO_THIRDS,
+        spot_check_milli: 0,
+        diverse_replicas: true,
+        sync_class: darm_compute::SyncClass::Async,
+        nonce: 1,
+    };
+    let plan = {
+        let n = &nodes[0];
+        let trust = |peer: &NodeId| n.compute_trust(peer);
+        let rtt = |peer: &NodeId| n.rtt_to(peer);
+        let context = darm_compute::PlanContext {
+            trust: &trust,
+            rtt_ms: &rtt,
+        };
+        n.compute
+            .pool
+            .plan(spec, coordinator, &context, NOW)
+            .unwrap()
+    };
+    assert!(
+        plan.gpu_shards > 0 && plan.cpu_shards > 0,
+        "both kinds used"
+    );
+    let receipts: Vec<darm_compute::SignedReceipt> = plan
+        .assignments
+        .iter()
+        .map(|a| {
+            let worker = &nodes[(0..3).find(|i| nodes[*i].node_id() == a.worker).unwrap()];
+            darm_compute::SignedReceipt::sign(
+                worker.identity(),
+                darm_compute::WorkReceipt {
+                    job: plan.job,
+                    shard: a.shard,
+                    worker: a.worker,
+                    input: plan.spec.inputs[a.shard as usize],
+                    output: Hash32::digest("out", &a.shard.to_be_bytes()),
+                    device: a.device,
+                    backend: a.backend,
+                    units: 100,
+                    elapsed_ms: 50,
+                    completed_ms: NOW,
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    let result = darm_compute::tally(&plan, &receipts);
+    assert!(result.complete && result.dissenters.is_empty());
+    let (entry, _) = nodes[0]
+        .commit_compute(result.commit_body().unwrap(), NOW)
+        .unwrap();
+    nodes[0].tick(NOW + 1);
+    assert!(nodes[0].ledger().contains_entry(&entry));
+    let record = nodes[0]
+        .ledger()
+        .state()
+        .compute_job(&coordinator, &plan.job)
+        .unwrap();
+    assert_eq!(record.workers, 3);
+    assert!(
+        nodes[0]
+            .commit_compute(
+                EntryBody::Vote {
+                    proposal: Hash32::ZERO,
+                    support: true
+                },
+                NOW
+            )
+            .is_err(),
+        "only compute commits go through this path"
+    );
+}
+
+#[test]
+fn phones_follow_owner_policy_and_back_off() {
+    let mut phone = node(
+        1,
+        DarmConfig {
+            form_factor: darm_compute::FormFactor::Phone,
+            policy: darm_compute::ContributionPolicy::for_form_factor(
+                darm_compute::FormFactor::Phone,
+            ),
+            ..DarmConfig::default()
+        },
+    );
+    let server_tuning = phone.sessions.local_tuning();
+    phone.set_conditions(darm_compute::Conditions {
+        on_battery: true,
+        charging: false,
+        battery_pct: 15,
+        metered: true,
+        ..darm_compute::Conditions::default()
+    });
+    let out = phone.tick(NOW);
+    let advert = out
+        .iter()
+        .find_map(|o| match &o.message {
+            Wire::ComputeAdvert { advert } => Some(advert.clone()),
+            _ => None,
+        })
+        .expect("phones still advertise (with nothing offered)");
+    assert!(
+        advert.advert.devices.is_empty(),
+        "unplugged phone offers nothing"
+    );
+    let tuning = phone.sessions.local_tuning();
+    assert!(tuning.interval_factor > server_tuning.interval_factor);
+    assert!(!tuning.announce);
+    phone.set_conditions(darm_compute::Conditions {
+        charging: true,
+        battery_pct: 90,
+        metered: false,
+        on_battery: true,
+        ..darm_compute::Conditions::default()
+    });
+    let out = phone.tick(NOW + 1);
+    let offered = out.iter().any(|o| {
+        matches!(&o.message, Wire::ComputeAdvert { advert } if !advert.advert.devices.is_empty())
+    });
+    assert!(offered, "charging on wifi: contributes");
+}
+
+#[test]
+fn global_rate_limit_stops_rotating_spoofed_sources() {
+    let mut target = node(1, DarmConfig::default());
+    let mut admitted = 0;
+    for i in 0..5_000 {
+        target.handle(
+            &format!("spoof{i}"),
+            Wire::MemoryRequest { ids: vec![] },
+            NOW,
+        );
+        admitted = target.counters.gossip_received;
+    }
+    assert!(admitted <= 2_000, "global bucket caps a burst: {admitted}");
+    assert!(target.counters.gossip_rate_limited >= 3_000);
 }

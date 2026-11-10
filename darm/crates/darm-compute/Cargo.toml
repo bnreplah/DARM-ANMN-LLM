@@ -1,0 +1,18 @@
+[package]
+name = "darm-compute"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "DARM-ANN compute pool: CPU, GPU and mobile device profiles, signed capability adverts, heterogeneous shard scheduling and ledger-committed redundant-execution receipts"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+darm-core = { path = "../darm-core", version = "0.1.0" }
+getrandom = "0.3"
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }

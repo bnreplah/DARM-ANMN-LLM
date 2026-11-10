@@ -4,14 +4,15 @@
 //!    trusted hits are rendered into a fenced, injection-hardened system
 //!    message.
 //! 2. **Route**: concrete mesh models are ranked by pheromone trails
-//!    (ant-colony optimization) and tried in order with fallback.
+//!    (ant-colony optimization), weighted by each endpoint's CPU/GPU
+//!    capacity from the compute pool, and tried in order with fallback.
 //! 3. **Learn**: every attempt lays trail or danger pheromone and feeds the
 //!    node's lifecycle; a successful exchange is remembered (locally unless
 //!    sharing is enabled) and, when mesh-scoped, committed to the ledger.
 //!
 //! Callers can steer a turn with an optional `darm` object in the request,
 //! which is removed before the request reaches any concrete model:
-//! `{"darm": {"recall": true, "remember": true, "namespace": "team-a", "top_k": 5}}`.
+//! `{"darm": {"recall": true, "remember": true, "namespace": "team-a", "top_k": 5, "tier": "tiny"}}`.
 
 use crate::node::DarmNode;
 use crate::wire::Outbound;
@@ -32,12 +33,43 @@ pub const VIRTUAL_MODEL: &str = "darm";
 const TURN_BUDGET: Duration = Duration::from_secs(120);
 static TURN_SEED: AtomicU64 = AtomicU64::new(0);
 
+/// Model tier hint (Paper 3: TinyLM 0.5–3B, Mid-Scale 7–30B, Consolidator
+/// 70B+). Routing to the smallest capable tier saves compute; the hint
+/// narrows candidates by advertised parameter count when any match and is
+/// ignored otherwise, so it can never make a turn unservable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Tiny,
+    Mid,
+    Consolidator,
+}
+
+impl Tier {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "tiny" => Self::Tiny,
+            "mid" => Self::Mid,
+            "consolidator" => Self::Consolidator,
+            _ => return None,
+        })
+    }
+
+    fn contains(self, billions: f64) -> bool {
+        match self {
+            Self::Tiny => billions <= 3.5,
+            Self::Mid => billions > 3.5 && billions <= 35.0,
+            Self::Consolidator => billions > 35.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOptions {
     pub recall: bool,
     pub remember: bool,
     pub namespace: String,
     pub top_k: usize,
+    pub tier: Option<Tier>,
 }
 
 /// Remove and parse the `darm` request extension.
@@ -72,11 +104,20 @@ pub fn take_options(
             .filter(|k| *k <= 20)
             .ok_or("darm.top_k must be an integer in 0..=20")? as usize,
     };
+    let tier = match extension.get("tier") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t == "auto" => None,
+        Some(Value::String(t)) => {
+            Some(Tier::parse(t).ok_or("darm.tier must be auto|tiny|mid|consolidator")?)
+        }
+        Some(_) => return Err("darm.tier must be a string".into()),
+    };
     Ok(TurnOptions {
         recall: get_bool("recall", true)?,
         remember: get_bool("remember", remember_default)?,
         namespace,
         top_k,
+        tier,
     })
 }
 
@@ -136,7 +177,11 @@ fn contains_any_key(value: &Value, keys: &[&str]) -> bool {
 
 /// Drop candidates that cannot serve the request's modalities; prefer
 /// tool-capable and non-deprioritized ones without emptying the pool.
-fn eligible(request: &Value, candidates: Vec<VirtualModelCandidate>) -> Vec<VirtualModelCandidate> {
+fn eligible(
+    request: &Value,
+    candidates: Vec<VirtualModelCandidate>,
+    tier: Option<Tier>,
+) -> Vec<VirtualModelCandidate> {
     let needs_vision = contains_any_key(request, &["image_url", "input_image"]);
     let needs_audio = contains_any_key(request, &["input_audio", "audio_url"]);
     let needs_tools = request
@@ -152,6 +197,13 @@ fn eligible(request: &Value, candidates: Vec<VirtualModelCandidate>) -> Vec<Virt
     }
     if pool.iter().any(|c| !c.deprioritized) {
         pool.retain(|c| !c.deprioritized);
+    }
+    if let Some(tier) = tier {
+        let in_tier =
+            |c: &VirtualModelCandidate| c.parameter_count_b.is_some_and(|b| tier.contains(b));
+        if pool.iter().any(in_tier) {
+            pool.retain(in_tier);
+        }
     }
     pool
 }
@@ -244,16 +296,26 @@ fn recall_into(
 }
 
 /// Phase 2a: order candidate routes by pheromone desirability.
+///
+/// The heuristic combines model size with the serving endpoint's place in
+/// the compute pool: faster, idler hardware scores higher, and phones on
+/// battery score lower so the mesh spares them.
 fn rank(node: &SharedNode, candidates: &[VirtualModelCandidate]) -> Vec<RouteKey> {
+    let now = now_ms();
+    let node = lock(node);
     let routes: Vec<(RouteKey, f64)> = candidates
         .iter()
         .map(|c| {
-            let heuristic = c.parameter_count_b.map_or(1.0, |b| b.max(0.5).sqrt());
-            (route_key(c), heuristic)
+            let size = c.parameter_count_b.map_or(1.0, |b| b.max(0.5).sqrt());
+            let compute = c
+                .target_node_id
+                .as_deref()
+                .map_or(1.0, |peer| node.route_factor(peer, now));
+            (route_key(c), size * compute)
         })
         .collect();
-    let seed = now_ms() ^ TURN_SEED.fetch_add(1, Ordering::Relaxed).rotate_left(32);
-    lock(node).rank_routes(&routes, now_ms(), seed)
+    let seed = now ^ TURN_SEED.fetch_add(1, Ordering::Relaxed).rotate_left(32);
+    node.rank_routes(&routes, now, seed)
 }
 
 /// Phase 2b: try routes in order, laying pheromone for every attempt.
@@ -386,6 +448,7 @@ where
     let candidates = eligible(
         &invocation.request,
         std::mem::take(&mut invocation.candidates),
+        prepared.options.tier,
     );
     if candidates.is_empty() {
         return (

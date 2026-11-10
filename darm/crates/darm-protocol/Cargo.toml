@@ -1,0 +1,23 @@
+[package]
+name = "darm-protocol"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "DARM-ANN polymorphic and adaptive protocols: negotiated Noise sessions bound to node identities, morphing padded frames, and link/device-aware tuning"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+blake3.workspace = true
+ciborium = "0.2"
+darm-core = { path = "../darm-core", version = "0.1.0" }
+getrandom = "0.3"
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-aes-gcm", "use-blake2", "use-sha2", "use-curve25519", "use-getrandom", "std"] }
+zeroize = "1"

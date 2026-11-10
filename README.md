@@ -14,6 +14,13 @@ Every node keeps pooling GPUs and serving one OpenAI-compatible API, and also:
 - runs the **biomimetic swarm** lifecycle (health, energy, reputation,
   genomes) with replication gated by validator votes instead of autonomous
   spawning.
+- pools **CPUs as well as GPUs** (and phones, with their owner's consent)
+  into one compute pool: signed capability adverts, CPU/GPU-split job
+  planning with redundant replicas, and majority-verified results committed
+  to the ledger as proof of useful work;
+- talks over **polymorphic, adaptive sessions**: per-peer negotiated Noise
+  handshakes bound to DARM identities, sealed and padded frames, and
+  protocol tuning from link quality, battery and data-plan state.
 
 Start with [`darm/README.md`](darm/README.md) for architecture, configuration
 and the security model. Server and infrastructure (archive node, Ethereum

@@ -19,6 +19,17 @@ pub struct Registration {
     pub registered_ms: u64,
 }
 
+/// A finalized pooled-compute result (see `EntryBody::ComputeCommit`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputeRecord {
+    pub coordinator: NodeId,
+    pub result_root: Hash32,
+    pub receipts_root: Hash32,
+    pub shards: u32,
+    pub workers: u16,
+    pub committed_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalOutcome {
@@ -68,6 +79,7 @@ pub struct LedgerState {
     reputation: BTreeMap<NodeId, i64>,
     proposals: HashMap<Hash32, ProposalState>,
     registrations: BTreeMap<NodeId, Registration>,
+    compute: HashMap<(NodeId, Hash32), ComputeRecord>,
 }
 
 impl LedgerState {
@@ -188,6 +200,32 @@ impl LedgerState {
                     state.no.insert(author);
                 }
             }
+            EntryBody::ComputeCommit {
+                job,
+                result_root,
+                receipts_root,
+                shards,
+                workers,
+            } => {
+                // Records are keyed by (coordinator, job). Job ids commit to
+                // the coordinator, but the ledger cannot see the job spec, so
+                // keying by job alone would let anyone who saw a commit in
+                // gossip front-run it under their own name.
+                if self.compute.contains_key(&(author, *job)) {
+                    return Err(DarmError::Duplicate);
+                }
+                self.compute.insert(
+                    (author, *job),
+                    ComputeRecord {
+                        coordinator: author,
+                        result_root: *result_root,
+                        receipts_root: *receipts_root,
+                        shards: *shards,
+                        workers: *workers,
+                        committed_ms: block_timestamp_ms,
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -237,5 +275,13 @@ impl LedgerState {
 
     pub fn reputations(&self) -> impl Iterator<Item = (&NodeId, &i64)> {
         self.reputation.iter()
+    }
+
+    pub fn compute_job(&self, coordinator: &NodeId, job: &Hash32) -> Option<&ComputeRecord> {
+        self.compute.get(&(*coordinator, *job))
+    }
+
+    pub fn compute_jobs(&self) -> usize {
+        self.compute.len()
     }
 }

@@ -82,6 +82,8 @@ members = [
     "darm/crates/darm-memory",
     "darm/crates/darm-swarm",
     "darm/crates/darm-mesh-plugin",
+    "darm/crates/darm-protocol",
+    "darm/crates/darm-compute",
     "tools/trajectory-reader",
 ]
 default-members = [

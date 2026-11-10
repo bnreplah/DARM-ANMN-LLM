@@ -41,7 +41,8 @@ fn options_are_parsed_and_stripped() {
             recall: true,
             remember: false,
             namespace: "team".into(),
-            top_k: 2
+            top_k: 2,
+            tier: None,
         }
     );
     assert!(
@@ -50,6 +51,57 @@ fn options_are_parsed_and_stripped() {
     );
     assert!(take_options(&mut json!({"darm": {"top_k": 999}}), true, 5).is_err());
     assert!(take_options(&mut json!({"darm": "yes"}), true, 5).is_err());
+}
+
+#[test]
+fn tier_hint_narrows_without_emptying_the_pool() {
+    let sized = |model: &str, b: f64| -> VirtualModelCandidate {
+        serde_json::from_value(
+            json!({"model_id": model, "target_node_id": "n", "parameter_count_b": b}),
+        )
+        .unwrap()
+    };
+    let pool = || {
+        vec![
+            sized("tiny-1b", 1.0),
+            sized("mid-14b", 14.0),
+            sized("xl-70b", 70.0),
+        ]
+    };
+    let request = json!({"messages": []});
+    let names =
+        |c: Vec<VirtualModelCandidate>| c.into_iter().map(|c| c.model_id).collect::<Vec<_>>();
+    assert_eq!(
+        names(eligible(&request, pool(), Some(Tier::Tiny))),
+        ["tiny-1b"]
+    );
+    assert_eq!(
+        names(eligible(&request, pool(), Some(Tier::Mid))),
+        ["mid-14b"]
+    );
+    assert_eq!(
+        names(eligible(&request, pool(), Some(Tier::Consolidator))),
+        ["xl-70b"]
+    );
+    assert_eq!(eligible(&request, pool(), None).len(), 3);
+    // No model in the tier: the hint is ignored rather than failing the turn.
+    let only_big = vec![sized("xl-70b", 70.0)];
+    assert_eq!(
+        names(eligible(&request, only_big, Some(Tier::Tiny))),
+        ["xl-70b"]
+    );
+    let mut req = json!({"darm": {"tier": "mid"}});
+    assert_eq!(
+        take_options(&mut req, true, 5).unwrap().tier,
+        Some(Tier::Mid)
+    );
+    assert!(take_options(&mut json!({"darm": {"tier": "huge"}}), true, 5).is_err());
+    assert_eq!(
+        take_options(&mut json!({"darm": {"tier": "auto"}}), true, 5)
+            .unwrap()
+            .tier,
+        None
+    );
 }
 
 #[test]

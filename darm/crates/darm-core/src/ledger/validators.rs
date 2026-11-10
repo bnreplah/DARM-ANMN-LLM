@@ -3,6 +3,25 @@ use crate::{DarmError, Hash32, NodeId, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The network's bootstrap security phase (DARM-ANN Volume 1.1 §3.1).
+///
+/// The `>2/3` finality rule already *is* the paper's Phase A rule at small
+/// sizes: with 3 validators it needs all 3 (BS1, unanimity), with 4–6 it
+/// needs N−1. What changes between phases is what the guarantee rests on,
+/// and status reports say so rather than implying BFT math applies at N=1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityPhase {
+    /// N < 7: safety rests on the identity and accountability of a small,
+    /// named validator set, not on Byzantine quorum math (BS1).
+    FederatedGenesis,
+    /// 7 ≤ N < 21: BFT bounds apply but with little margin; new members
+    /// should be sponsored by existing validators.
+    GraduatedOnboarding,
+    /// N ≥ 21: the CDCP/BFT guarantees (P39/P40) are the operative ones.
+    PermissionlessBft,
+}
+
 /// Weighted validator set. Weights are integers so that quorum arithmetic is
 /// exact and identical on every implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -74,6 +93,19 @@ impl ValidatorSet {
         let unique: BTreeSet<&NodeId> = signers.into_iter().collect();
         let signed: u64 = unique.into_iter().map(|node| self.weight(node)).sum();
         signed * 3 > self.total_weight() * 2
+    }
+
+    /// Byzantine validators tolerated by the `>2/3` rule: `⌊(N−1)/3⌋`.
+    pub fn max_faulty(&self) -> usize {
+        self.members.len().saturating_sub(1) / 3
+    }
+
+    pub fn security_phase(&self) -> SecurityPhase {
+        match self.members.len() {
+            0..=6 => SecurityPhase::FederatedGenesis,
+            7..=20 => SecurityPhase::GraduatedOnboarding,
+            _ => SecurityPhase::PermissionlessBft,
+        }
     }
 
     /// Round-robin proposer for `(height, round)`.
@@ -162,5 +194,41 @@ mod tests {
         let b = set.proposer_for(1, 1);
         assert_ne!(a, b);
         assert_eq!(set.proposer_for(2, 0), b);
+    }
+
+    #[test]
+    fn phases_and_phase_a_quorums_match_volume_1_1() {
+        let set = |n: u8| {
+            ValidatorSet::equal(
+                (1..=n).map(|s| NodeIdentity::from_secret_bytes(&[s; 32]).node_id()),
+            )
+            .unwrap()
+        };
+        let ids = |n: u8| {
+            (1..=n)
+                .map(|s| NodeIdentity::from_secret_bytes(&[s; 32]).node_id())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(set(1).security_phase(), SecurityPhase::FederatedGenesis);
+        assert_eq!(set(6).security_phase(), SecurityPhase::FederatedGenesis);
+        assert_eq!(set(7).security_phase(), SecurityPhase::GraduatedOnboarding);
+        assert_eq!(set(21).security_phase(), SecurityPhase::PermissionlessBft);
+        assert_eq!(
+            (
+                set(3).max_faulty(),
+                set(7).max_faulty(),
+                set(21).max_faulty()
+            ),
+            (0, 2, 6)
+        );
+        // BS1: 3 genesis validators need unanimity; 4-6 need N-1.
+        let three = ids(3);
+        assert!(!set(3).has_quorum(&three[..2]));
+        assert!(set(3).has_quorum(&three));
+        for n in 4..=6u8 {
+            let all = ids(n);
+            assert!(set(n).has_quorum(&all[..usize::from(n) - 1]));
+            assert!(!set(n).has_quorum(&all[..usize::from(n) - 2]));
+        }
     }
 }
