@@ -53,6 +53,25 @@ pub struct StoreArgs {
     pub share: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OutcomeArgs {
+    /// Memory id (hex) from a `darm_memory_search` hit.
+    pub id: String,
+    /// Whether acting on the recalled memory helped (true) or hurt (false).
+    pub helped: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct FeedArgs {
+    /// Return events after this sequence number (default 0: from the start
+    /// of what is retained).
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// Maximum events, 1..=200 (default 50).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKindArg {
@@ -84,6 +103,8 @@ const DARM_MEMORY_SEARCH_DESC: &str = "Associative recall over the distributed m
 const DARM_MEMORY_STORE_DESC: &str = "Store a signed memory as this node";
 const DARM_MEMORY_FORGET_DESC: &str =
     "Forget one of this node's memories (tombstone + ledger revoke)";
+const DARM_MEMORY_OUTCOME_DESC: &str = "Report whether a recalled memory helped or hurt, once per recall. Helpful memories rank higher; ones that keep hurting drop out of recall";
+const DARM_MEMORY_FEED_DESC: &str = "Recent memory activity (remembered, recalled, helped, hurt, consolidated, demoted, forgotten) as ids and event kinds, never content";
 const DARM_LEDGER_PROOF_DESC: &str =
     "Merkle inclusion proof for a finalized ledger entry (for light clients and on-chain anchors)";
 
@@ -95,6 +116,8 @@ pub fn manifest_entries() -> Vec<ManifestEntry> {
         operation::<SearchArgs>("darm_memory_search", DARM_MEMORY_SEARCH_DESC).into(),
         operation::<StoreArgs>("darm_memory_store", DARM_MEMORY_STORE_DESC).into(),
         operation::<IdArgs>("darm_memory_forget", DARM_MEMORY_FORGET_DESC).into(),
+        operation::<OutcomeArgs>("darm_memory_outcome", DARM_MEMORY_OUTCOME_DESC).into(),
+        operation::<FeedArgs>("darm_memory_feed", DARM_MEMORY_FEED_DESC).into(),
         operation::<IdArgs>("darm_ledger_proof", DARM_LEDGER_PROOF_DESC).into(),
     ]
     .into_iter()
@@ -221,6 +244,37 @@ pub fn router(node: SharedNode) -> OperationRouter {
 
     let n = Arc::clone(&node);
     router.add_json(
+        json_schema_operation::<OutcomeArgs>("darm_memory_outcome", DARM_MEMORY_OUTCOME_DESC),
+        move |args: OutcomeArgs, _context| {
+            let n = Arc::clone(&n);
+            Box::pin(async move {
+                let id = Hash32::from_hex(&args.id).map_err(bad)?;
+                let usefulness = n
+                    .lock()
+                    .expect("darm node lock")
+                    .memory_outcome(&id, args.helped, now_ms())
+                    .map_err(bad)?;
+                Ok(json!({ "memory": id, "usefulness": usefulness }))
+            })
+        },
+    );
+
+    let n = Arc::clone(&node);
+    router.add_json(
+        json_schema_operation::<FeedArgs>("darm_memory_feed", DARM_MEMORY_FEED_DESC),
+        move |args: FeedArgs, _context| {
+            let n = Arc::clone(&n);
+            Box::pin(async move {
+                let limit = args.limit.unwrap_or(50).clamp(1, 200);
+                let node = n.lock().expect("darm node lock");
+                let (head, events) = node.memory_feed(args.after.unwrap_or(0), limit);
+                Ok(json!({ "head": head, "events": events }))
+            })
+        },
+    );
+
+    let n = Arc::clone(&node);
+    router.add_json(
         json_schema_operation::<IdArgs>("darm_ledger_proof", DARM_LEDGER_PROOF_DESC),
         move |args: IdArgs, _context| {
             let n = Arc::clone(&n);
@@ -271,6 +325,8 @@ mod tests {
             "darm_memory_search",
             "darm_memory_store",
             "darm_memory_forget",
+            "darm_memory_outcome",
+            "darm_memory_feed",
             "darm_ledger_proof",
             "darm_compute_status",
             "darm_resources",

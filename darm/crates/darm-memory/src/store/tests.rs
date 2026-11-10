@@ -158,7 +158,7 @@ fn consolidation_by_recall_and_finality() {
         )
         .unwrap()
         .id();
-    store.mark_finalized(&b).unwrap();
+    store.mark_finalized(&b, NOW).unwrap();
     assert_eq!(store.tier(&b), Some(Tier::LongTerm));
     let important = store
         .remember(
@@ -195,7 +195,7 @@ fn trust_and_finality_filters() {
         ..SearchOptions::default()
     };
     assert!(store.search("deploy flag", &finalized_only, NOW).is_empty());
-    store.mark_finalized(&id).unwrap();
+    store.mark_finalized(&id, NOW).unwrap();
     assert_eq!(store.search("deploy flag", &finalized_only, NOW).len(), 1);
 }
 
@@ -236,7 +236,7 @@ fn persistent_log_round_trip_and_tamper_detection() {
             .unwrap()
             .id();
         store.forget(&me, &gone, NOW).unwrap();
-        store.mark_finalized(&id).unwrap();
+        store.mark_finalized(&id, NOW).unwrap();
     }
     let store = MemoryStore::open(MemoryLog::new(&path), MemoryLimits::default()).unwrap();
     assert_eq!(store.len(), 1);
@@ -264,4 +264,203 @@ fn namespace_tag_isolates_recall() {
         ..SearchOptions::default()
     };
     assert_eq!(store.search("console dark mode", &alice_view, NOW).len(), 1);
+}
+
+// ------------------------------------------------- learning from outcomes
+
+fn recall(store: &mut MemoryStore, query: &str) -> Vec<Hit> {
+    store.search(query, &SearchOptions::default(), NOW)
+}
+
+/// Two memories that answer the same question differently.
+fn rivals(store: &mut MemoryStore) -> (Hash32, Hash32) {
+    let me = identity(1);
+    let right = store
+        .remember(
+            &me,
+            record(
+                "deploy the gateway with the blue green script",
+                Scope::Local,
+                500,
+            ),
+        )
+        .unwrap()
+        .id();
+    let wrong = store
+        .remember(
+            &me,
+            record(
+                "deploy the gateway by editing the live config",
+                Scope::Local,
+                500,
+            ),
+        )
+        .unwrap()
+        .id();
+    (right, wrong)
+}
+
+#[test]
+fn helpful_memories_outrank_harmful_ones_that_match_equally() {
+    let mut store = MemoryStore::new(MemoryLimits::default());
+    let (right, wrong) = rivals(&mut store);
+    for _ in 0..3 {
+        let hits = recall(&mut store, "deploy the gateway");
+        assert_eq!(hits.len(), 2);
+        store.record_outcome(&right, Outcome::Helped, NOW).unwrap();
+        store.record_outcome(&wrong, Outcome::Hurt, NOW).unwrap();
+    }
+    let hits = recall(&mut store, "deploy the gateway");
+    assert_eq!(hits[0].id, right);
+    assert!(hits[0].usefulness > 0.7 && hits[0].outcomes == 3);
+    assert!(hits[1].usefulness < 0.3);
+    assert!(hits[0].score > hits[1].score * 1.5);
+}
+
+#[test]
+fn a_memory_that_keeps_hurting_drops_out_of_recall_and_is_demoted() {
+    let mut store = MemoryStore::new(MemoryLimits::default());
+    let me = identity(1);
+    // Important enough to start in long-term storage.
+    let id = store
+        .remember(
+            &me,
+            record(
+                "restart the database to clear slow queries",
+                Scope::Local,
+                900,
+            ),
+        )
+        .unwrap()
+        .id();
+    assert_eq!(store.tier(&id), Some(Tier::LongTerm));
+    for report in 1..=4 {
+        assert_eq!(
+            recall(&mut store, "slow queries database").len(),
+            1,
+            "report {report}"
+        );
+        store.record_outcome(&id, Outcome::Hurt, NOW).unwrap();
+    }
+    assert_eq!(
+        store.tier(&id),
+        Some(Tier::ShortTerm),
+        "demoted, not deleted"
+    );
+    assert!(recall(&mut store, "slow queries database").is_empty());
+    assert_eq!(store.stats().harmful, 1);
+    // It is still there for review, and its content is untouched.
+    let review = SearchOptions {
+        include_harmful: true,
+        ..SearchOptions::default()
+    };
+    let hits = store.search("slow queries database", &review, NOW);
+    assert_eq!(hits[0].id, id);
+    assert!(store.get(&id).unwrap().verify().is_ok());
+    // Being finalized on the ledger does not re-promote it here.
+    store.mark_finalized(&id, NOW).unwrap();
+    assert_eq!(store.tier(&id), Some(Tier::ShortTerm));
+}
+
+#[test]
+fn rehearsal_does_not_consolidate_a_memory_that_hurt_more_than_it_helped() {
+    let mut store = MemoryStore::new(MemoryLimits::default());
+    let (right, wrong) = rivals(&mut store);
+    recall(&mut store, "deploy the gateway");
+    store.record_outcome(&wrong, Outcome::Hurt, NOW).unwrap();
+    store.record_outcome(&right, Outcome::Helped, NOW).unwrap();
+    for _ in 0..4 {
+        recall(&mut store, "deploy the gateway");
+    }
+    assert_eq!(store.tier(&right), Some(Tier::LongTerm));
+    assert_eq!(store.tier(&wrong), Some(Tier::ShortTerm));
+}
+
+#[test]
+fn feedback_is_one_report_per_recall() {
+    let mut store = MemoryStore::new(MemoryLimits::default());
+    let (right, _) = rivals(&mut store);
+    // Never recalled: nothing to score.
+    assert!(store.record_outcome(&right, Outcome::Helped, NOW).is_err());
+    let unknown = Hash32::digest("test", b"nope");
+    assert!(
+        store
+            .record_outcome(&unknown, Outcome::Helped, NOW)
+            .is_err()
+    );
+    recall(&mut store, "deploy the gateway");
+    store.record_outcome(&right, Outcome::Helped, NOW).unwrap();
+    assert!(
+        store.record_outcome(&right, Outcome::Helped, NOW).is_err(),
+        "a single recall cannot be scored twice"
+    );
+    assert_eq!(store.stats().scored, 1);
+}
+
+#[test]
+fn outcomes_survive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("darm-outcome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("memory.jsonl");
+    let me = identity(1);
+    let id = {
+        let mut store = MemoryStore::open(MemoryLog::new(&path), MemoryLimits::default()).unwrap();
+        let id = store
+            .remember(
+                &me,
+                record(
+                    "restart the database to clear slow queries",
+                    Scope::Local,
+                    900,
+                ),
+            )
+            .unwrap()
+            .id();
+        for _ in 0..4 {
+            recall(&mut store, "slow queries database");
+            store.record_outcome(&id, Outcome::Hurt, NOW).unwrap();
+        }
+        id
+    };
+    let mut store = MemoryStore::open(MemoryLog::new(&path), MemoryLimits::default()).unwrap();
+    assert_eq!(store.tier(&id), Some(Tier::ShortTerm));
+    assert_eq!(store.stats().harmful, 1);
+    assert!(recall(&mut store, "slow queries database").is_empty());
+    assert_eq!(
+        store.feed().head(),
+        0,
+        "replayed history is not new activity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_feed_reports_what_the_store_did_without_content() {
+    let mut store = MemoryStore::new(MemoryLimits::default());
+    let (right, wrong) = rivals(&mut store);
+    recall(&mut store, "deploy the gateway");
+    store.record_outcome(&right, Outcome::Helped, NOW).unwrap();
+    store.record_outcome(&wrong, Outcome::Hurt, NOW).unwrap();
+    let me = identity(1);
+    store.forget(&me, &wrong, NOW).unwrap();
+
+    let events = store.feed().since(0, 100);
+    let kinds: Vec<FeedKind> = events.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds.iter().filter(|k| **k == FeedKind::Remembered).count(),
+        2
+    );
+    assert_eq!(
+        kinds.iter().filter(|k| **k == FeedKind::Recalled).count(),
+        2
+    );
+    assert!(kinds.contains(&FeedKind::Helped) && kinds.contains(&FeedKind::Hurt));
+    assert_eq!(kinds.last(), Some(&FeedKind::Forgotten));
+    assert!(events.windows(2).all(|w| w[0].seq + 1 == w[1].seq));
+    let json = serde_json::to_string(&events).unwrap();
+    assert!(
+        !json.contains("gateway"),
+        "the feed carries ids, never content"
+    );
 }

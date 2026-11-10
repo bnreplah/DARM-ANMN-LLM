@@ -55,3 +55,8 @@ Ordered by security value first.
     entry that publishes `receipts_root` before the beacon block, plugin
     operations to request and collect audit receipts, feeding outcomes into
     worker trust, and a verifiable random function for the beacon.
+16. **Outcome learning beyond one node.** `darm_memory_outcome` scores
+    memories from the caller's reports, locally. Remaining: have the chat
+    path report outcomes automatically (for example from user corrections),
+    a way to share outcome evidence that cannot be used to promote poisoned
+    memories, and feeding outcomes into author trust.

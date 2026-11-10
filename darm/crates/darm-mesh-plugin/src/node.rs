@@ -500,7 +500,8 @@ impl DarmNode {
             }
             for entry in &block.entries {
                 if let EntryBody::MemoryCommit { memory, .. } = &entry.entry.body {
-                    self.memory.mark_finalized(memory)?;
+                    self.memory
+                        .mark_finalized(memory, block.header.timestamp_ms)?;
                 }
             }
             self.persisted_height = height;
@@ -1089,6 +1090,7 @@ fn restrict_dir(_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+mod learning;
 mod one_vote;
 mod rounds;
 

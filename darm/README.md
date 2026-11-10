@@ -66,7 +66,8 @@ Responses carry `x-darm-memories` (memories injected), `x-darm-route`
 
 Operations (projected by the host as MCP tools and plugin HTTP):
 `darm_status`, `darm_resources`, `darm_memory_search`, `darm_memory_store`,
-`darm_memory_forget`, `darm_ledger_proof`, and the compute pool's
+`darm_memory_forget`, `darm_memory_outcome`, `darm_memory_feed`,
+`darm_ledger_proof`, and the compute pool's
 `darm_compute_status`, `darm_compute_conditions`, `darm_compute_plan`,
 `darm_compute_receipt`, `darm_compute_tally`. `darm_resources` reports pooled
 nodes, CPU cores, GPU/NPU devices and accelerator memory **available** vs
@@ -74,6 +75,51 @@ nodes, CPU cores, GPU/NPU devices and accelerator memory **available** vs
 
 New here? [`docs/QUICKSTART.md`](docs/QUICKSTART.md) covers running standalone,
 bringing your own model or token, and reading the resource view.
+
+## Memory that learns from results
+
+Recalling a memory strengthens it. On its own that rule has a flaw: a memory
+that is retrieved often is rehearsed and consolidated whether or not it was
+right, so a confidently wrong memory can become one of the strongest. DARM
+therefore also records what happened after a recall.
+
+```text
+ darm_memory_search ──► hits (each with id, usefulness, outcomes)
+        │
+        ▼ act on a hit
+ darm_memory_outcome { id, helped: true | false }      one report per recall
+        │
+        ▼
+ usefulness = (helped + 2) / (helped + hurt + 4)       starts at 0.5
+        ├─ multiplies the memory's recall score by 0.5 + usefulness
+        ├─ more hurt than helped  → rehearsal no longer consolidates it
+        └─ 4+ reports, below 0.35 → demoted to short-term, left out of recall
+```
+
+- **It takes several reports to move a memory.** One bad outcome shifts the
+  estimate from 0.5 to 0.4; four in a row with none good are needed before a
+  memory is treated as harmful.
+- **Feedback must be earned by use.** A report is accepted only for a memory
+  with a recall that has not been scored, once per recall, so a memory
+  cannot be boosted without being used.
+- **Nothing is deleted or rewritten.** A harmful memory keeps its signed
+  content, can still be listed for review, and is forgotten by ordinary
+  decay and eviction. Ledger finality does not override this node's own
+  experience of a memory.
+- **Outcomes stay local.** They are stored in this node's memory log and
+  are never gossiped: a peer's claim that a memory "helped" would be an easy
+  way to promote a poisoned one. Sharing outcomes safely is future work.
+
+`darm_memory_feed { after, limit }` returns the store's recent activity
+(remembered, learned from a peer, recalled, helped, hurt, consolidated,
+demoted, finalized, forgotten) as ids and event kinds with a sequence number
+to resume from. It never includes memory content, and it is an in-memory
+view of the last 512 events, not an audit log.
+
+What this is: a feedback loop in which results change what the node
+retrieves next. What it is not: the node does not judge outcomes itself (the
+caller reports them), it does not retrain any model, and the feed is a record
+of memory activity, not awareness.
 
 ## Compute pool: CPUs and GPUs, servers and phones
 

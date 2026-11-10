@@ -940,3 +940,46 @@ fn one_vote_and_locking_nodes_ignore_each_others_messages() {
         (0, 0)
     );
 }
+
+#[test]
+fn recall_feedback_changes_ranking_and_shows_in_the_feed() {
+    let mut node = DarmNode::ephemeral(DarmConfig::default(), identity(1), NOW).unwrap();
+    let mut store = |content: &str| {
+        let record = darm_memory::MemoryRecord {
+            author: node.node_id(),
+            created_ms: NOW,
+            kind: darm_memory::MemoryKind::Procedural,
+            scope: darm_memory::Scope::Local,
+            importance_milli: 500,
+            valence_milli: 0,
+            tags: Vec::new(),
+            content: content.into(),
+            parent: None,
+        };
+        node.remember(record, "default", NOW).unwrap().0.id()
+    };
+    let right = store("rotate the signing key with the keygen command");
+    let wrong = store("rotate the signing key by copying it from a peer");
+    for _ in 0..3 {
+        assert_eq!(
+            node.recall("rotate the signing key", "default", 5, NOW)
+                .len(),
+            2
+        );
+        node.memory_outcome(&right, true, NOW).unwrap();
+        node.memory_outcome(&wrong, false, NOW).unwrap();
+    }
+    // A fourth bad outcome makes the wrong memory drop out of recall.
+    node.recall("rotate the signing key", "default", 5, NOW);
+    node.memory_outcome(&wrong, false, NOW).unwrap();
+    let hits = node.recall("rotate the signing key", "default", 5, NOW);
+    assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [right]);
+    // Feedback without a recall to score is refused.
+    assert!(node.memory_outcome(&wrong, true, NOW).is_err());
+
+    let (head, events) = node.memory_feed(0, 200);
+    assert_eq!(head, events.last().unwrap().seq);
+    let later = node.memory_feed(head, 200).1;
+    assert!(later.is_empty(), "nothing new since the head");
+    assert!(events.iter().any(|e| e.kind == darm_memory::FeedKind::Hurt));
+}
