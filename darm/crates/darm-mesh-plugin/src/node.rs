@@ -7,7 +7,9 @@ use crate::config::{DarmConfig, SessionMode};
 use crate::sessions::Sessions;
 use crate::wire::{MAX_BLOCKS_PER_SYNC, MAX_MEMORIES_PER_PUSH, Outbound, Wire};
 use darm_core::ledger::{
-    ChainConfig, EntryBody, Ledger, ProposalOutcome, SignedEntry, ValidatorSet, store::BlockLog,
+    ChainConfig, EntryBody, Ledger, ProposalOutcome, SignedEntry, ValidatorSet,
+    locking::Step,
+    store::{BlockLog, VoteLog},
 };
 use darm_core::{DarmError, Hash32, NodeId, NodeIdentity, Result};
 use darm_memory::{
@@ -68,6 +70,8 @@ pub struct Counters {
     pub adverts_received: u64,
     pub turns: u64,
     pub turns_failed: u64,
+    /// Validators caught signing two different votes in one round.
+    pub equivocations: u64,
 }
 
 pub struct DarmNode {
@@ -92,6 +96,11 @@ pub struct DarmNode {
     /// Peer -> when we sent it a request we expect an answer to (RTT).
     outstanding: HashMap<String, u64>,
     early_attestations: HashMap<Hash32, Vec<darm_core::ledger::Attestation>>,
+    /// Lock-based BFT: this validator's durable votes for the open height.
+    vote_log: Option<VoteLog>,
+    /// Lock-based BFT: the `(height, round, step)` being timed and when it
+    /// started.
+    round_timer: Option<((u64, u32, Step), u64)>,
     pub compute: ComputeState,
     pub sessions: Sessions,
     registration_submitted: bool,
@@ -112,22 +121,28 @@ impl DarmNode {
         restrict_dir(&dir)?;
         let identity = NodeIdentity::load_or_create(&dir.join("identity.key"))?;
         let chain = chain_config(&config, &identity)?;
-        let log = BlockLog::new(dir.join(format!("ledger-{}.jsonl", chain.chain_id().short())));
+        let chain_short = chain.chain_id().short();
+        let log = BlockLog::new(dir.join(format!("ledger-{chain_short}.jsonl")));
         let ledger = log.load(chain)?;
         let memory = MemoryStore::open(
             MemoryLog::new(dir.join("memory.jsonl")),
             MemoryLimits::default(),
         )?;
+        let votes = VoteLog::new(dir.join(format!("votes-{}.jsonl", chain_short)));
         let mut node = Self::assemble(config, identity, ledger, memory, now_ms)?;
         node.persisted_height = node.ledger.height();
         node.block_log = Some(log);
+        node.vote_log = Some(votes);
+        node.start_consensus()?;
         Ok(node)
     }
 
     pub fn ephemeral(config: DarmConfig, identity: NodeIdentity, now_ms: u64) -> Result<Self> {
         let ledger = Ledger::new(chain_config(&config, &identity)?);
         let memory = MemoryStore::new(MemoryLimits::default());
-        Self::assemble(config, identity, ledger, memory, now_ms)
+        let mut node = Self::assemble(config, identity, ledger, memory, now_ms)?;
+        node.start_consensus()?;
+        Ok(node)
     }
 
     fn assemble(
@@ -168,6 +183,8 @@ impl DarmNode {
             },
             outstanding: HashMap::new(),
             early_attestations: HashMap::new(),
+            vote_log: None,
+            round_timer: None,
             compute,
             sessions,
             registration_submitted: false,
@@ -496,27 +513,10 @@ impl DarmNode {
     }
 
     fn try_propose(&mut self, now_ms: u64) -> Result<Vec<Outbound>> {
-        let me = self.node_id();
-        let next = self.ledger.height() + 1;
-        if self.ledger.pending_len() == 0
-            || self.ledger.proposer_for_next(self.round) != me
-            || self.proposed_at == Some((next, self.round))
-        {
-            return Ok(Vec::new());
+        if self.locking() {
+            return self.try_propose_round(now_ms);
         }
-        self.proposed_at = Some((next, self.round));
-        let Some(mut block) = self.ledger.propose(&self.identity, self.round, now_ms)? else {
-            return Ok(Vec::new());
-        };
-        let hash = block.hash();
-        if let Ok((attestation, _)) = self.ledger.attest(&self.identity, &hash) {
-            block.attestations.push(attestation);
-        }
-        self.sync_effects()?;
-        if self.ledger_gossip() {
-            return Ok(vec![Outbound::broadcast(Wire::BlockProposal { block })]);
-        }
-        Ok(Vec::new())
+        self.try_propose_one_vote(now_ms)
     }
 
     fn ensure_registered(&mut self, now_ms: u64) -> Result<Vec<Outbound>> {
@@ -609,7 +609,12 @@ impl DarmNode {
                 Err(error) => tracing::debug!(%error, "darm tick step failed"),
             }
         }
-        if self.ledger.pending_len() > 0
+        if self.locking() {
+            match self.tick_round_timer(now_ms) {
+                Ok(mut messages) => out.append(&mut messages),
+                Err(error) => tracing::debug!(%error, "darm round timer failed"),
+            }
+        } else if self.ledger.pending_len() > 0
             && now_ms.saturating_sub(self.last_progress_ms)
                 > ROUND_TIMEOUT_MS.saturating_mul(u64::from(self.round) + 1)
         {
@@ -819,38 +824,6 @@ impl DarmNode {
             .collect()
     }
 
-    fn buffer_attestation(&mut self, block: Hash32, attestation: darm_core::ledger::Attestation) {
-        if !self.ledger.is_validator(&attestation.validator) {
-            return;
-        }
-        if !self.early_attestations.contains_key(&block)
-            && self.early_attestations.len() >= MAX_EARLY_BLOCKS
-        {
-            return;
-        }
-        let pending = self.early_attestations.entry(block).or_default();
-        if pending.len() < MAX_EARLY_PER_BLOCK
-            && !pending.iter().any(|a| a.validator == attestation.validator)
-        {
-            pending.push(attestation);
-        }
-    }
-
-    /// The block for buffered attestations arrived: verify and apply them.
-    fn apply_early_attestations(&mut self, block: &Hash32) {
-        let Some(pending) = self.early_attestations.remove(block) else {
-            return;
-        };
-        for attestation in pending {
-            if self.ledger.candidate(block).is_none() {
-                break;
-            }
-            if let Err(error) = self.ledger.receive_attestation(block, attestation) {
-                tracing::debug!(%error, "darm buffered attestation rejected");
-            }
-        }
-    }
-
     /// An answer to an outstanding request arrived: feed the RTT sample.
     fn answered(&mut self, source: &str, now_ms: u64) {
         if let Some(sent) = self.outstanding.remove(source) {
@@ -896,40 +869,16 @@ impl DarmNode {
             Wire::LedgerEntry { entry } if ledger_gossip => {
                 self.ledger.submit(entry, now_ms)?;
             }
-            Wire::BlockProposal { block } if ledger_gossip => {
-                if block.header.height > self.ledger.height() + 1 {
-                    out.push(Outbound::to(
-                        source,
-                        Wire::SyncRequest {
-                            chain: self.ledger.chain_id(),
-                            from_height: self.ledger.height(),
-                        },
-                    ));
-                    return Ok(out);
-                }
-                let (hash, _) = self.ledger.receive_proposal(block, now_ms)?;
-                self.apply_early_attestations(&hash);
-                if self.ledger.is_validator(&self.node_id())
-                    && self.ledger.candidate(&hash).is_some()
-                    && let Ok((attestation, _)) = self.ledger.attest(&self.identity, &hash)
-                {
-                    out.push(Outbound::broadcast(Wire::Attestation {
-                        block_hash: hash,
-                        attestation,
-                    }));
-                }
-                self.sync_effects()?;
-            }
-            Wire::Attestation {
-                block_hash,
-                attestation,
-            } if ledger_gossip => {
-                if self.ledger.candidate(&block_hash).is_some() {
-                    self.ledger.receive_attestation(&block_hash, attestation)?;
-                    self.sync_effects()?;
-                } else {
-                    self.buffer_attestation(block_hash, attestation);
-                }
+            message @ (Wire::RoundProposal { .. }
+            | Wire::RoundVote { .. }
+            | Wire::BlockProposal { .. }
+            | Wire::Attestation { .. }) => {
+                out.append(&mut self.on_consensus_message(
+                    source,
+                    message,
+                    ledger_gossip,
+                    now_ms,
+                )?);
             }
             Wire::SyncRequest { chain, from_height } if ledger_gossip => {
                 if chain != self.ledger.chain_id() {
@@ -1139,6 +1088,9 @@ fn restrict_dir(dir: &std::path::Path) -> Result<()> {
 fn restrict_dir(_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
+
+mod one_vote;
+mod rounds;
 
 #[cfg(test)]
 mod tests;
