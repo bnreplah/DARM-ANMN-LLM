@@ -31,7 +31,9 @@ protocol spec for other implementations) live in the companion repository
    ├─ darm-core     identities, canonical encoding, Merkle, quorum ledger
    ├─ darm-swarm    lifecycle, pheromones, genome, governed replication
    ├─ darm-compute  CPU/GPU/NPU/phone pool, heterogeneous scheduler, receipts
-   └─ darm-protocol polymorphic negotiation, identity-bound sessions, adaptation
+   ├─ darm-protocol polymorphic negotiation, identity-bound sessions, adaptation
+   └─ darm-fabric   prioritized channels over a session on any carrier (not yet
+                    wired into the plugin; see the crate README)
 ```
 
 | Crate | Role |
@@ -41,6 +43,7 @@ protocol spec for other implementations) live in the companion repository
 | [`darm-swarm`](crates/darm-swarm) | Biomimetic lifecycle (germinating → active → flowering → reproducing, resting, damaged/healing) driven by measured success, latency and load; pheromone field with half-life decay and ACO ranking; deterministic genomes; replication *recommendations*. |
 | [`darm-compute`](crates/darm-compute) | Compute pool over CPUs, GPUs, NPUs and phones: device profiles and live conditions, owner contribution policy, signed short-lived capability adverts (optionally proven to a mesh endpoint by the host's plugin-key binding), smooth-weighted-round-robin shard planning across CPU and GPU with replicas on distinct nodes, measurement-corrected throughput, adaptive shard sizing, signed work receipts and majority tallies that become ledger `ComputeCommit` entries. |
 | [`darm-protocol`](crates/darm-protocol) | Polymorphic and adaptive protocols: per-pair negotiation of cipher suite (ChaCha20-Poly1305 vs AES-GCM by hardware), codec (JSON/CBOR) and padding; Noise XX handshakes (`snow`) bound to DARM Ed25519 identities; sealed frames with masked nonces, bucket padding, replay windows and bounded fragmentation; RFC 6298 RTT estimation and AIMD batching tuned by battery, metered and thermal state. |
+| [`darm-fabric`](crates/darm-fabric) | The fabric shim: one authenticated link carries many workload channels, each with a sync class (`async`, `block`, `pipeline`, `tight`), size limit and rate limit. Strict priority for `tight` traffic with deadlines, weighted sharing for the rest, bounded queues in both directions. Binary tensor streams (`f32` or quantized `i8`) chunked to one frame each and digest-verified. Carrier-agnostic (`Transport` trait; in-process and TCP carriers included) with an I/O-free link state machine. |
 | [`darm-mesh-plugin`](crates/darm-mesh-plugin) | The built-in mesh-llm plugin: `darm` virtual model, gossip on `darm.v1`, ledger block production, MCP/HTTP operations. Registered by `mesh-llm-host-runtime` as an optional in-process built-in. |
 
 ## Using it
@@ -275,7 +278,9 @@ DARM-ANN was built security-first. The assumptions and controls:
 ```bash
 export RUSTC_WRAPPER=   # upstream config wraps rustc with sccache
 cargo test -p darm-core -p darm-memory -p darm-swarm -p darm-mesh-plugin
+cargo test -p darm-fabric
 cargo clippy -p darm-core -p darm-memory -p darm-swarm -p darm-mesh-plugin --all-targets -- -D warnings
+cargo clippy -p darm-fabric --all-targets -- -D warnings
 ```
 
 See [`UPSTREAM.md`](UPSTREAM.md) for how the mesh-llm sources were imported
