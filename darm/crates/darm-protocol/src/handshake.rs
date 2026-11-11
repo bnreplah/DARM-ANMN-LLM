@@ -22,6 +22,7 @@
 //!   its role. The hash covers both ephemerals, so a binding cannot be
 //!   replayed into another session, and the role byte prevents reflection.
 
+use crate::hybrid::{self, KemSecret};
 use crate::session::{Session, SessionLimits};
 use crate::suite::{Offer, Selected, Suite, negotiate};
 use base64::Engine;
@@ -183,6 +184,9 @@ impl HandshakeMsg {
 struct RespPayload {
     offer: Offer,
     bind: Binding,
+    /// Base64 ML-KEM-768 ciphertext, present exactly for hybrid suites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kem: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -213,7 +217,7 @@ fn prologue(network: &Hash32, sid: &[u8; 16], suite: Suite, offer: &Offer) -> Ve
     encoder
         .fixed32(network.as_bytes())
         .bytes(sid)
-        .str(suite.noise_params());
+        .str(suite.label());
     offer.encode(&mut encoder);
     encoder.finish()
 }
@@ -246,6 +250,8 @@ pub struct Initiator {
     suite: Suite,
     state: snow::HandshakeState,
     retried: bool,
+    /// Our ML-KEM secret, for hybrid suites.
+    kem: Option<KemSecret>,
 }
 
 impl Initiator {
@@ -264,8 +270,16 @@ impl Initiator {
         retried: bool,
     ) -> Result<(Self, HandshakeMsg)> {
         let mut state = build(config, &sid, suite, &config.offer, true)?;
+        // A hybrid suite sends a fresh ML-KEM encapsulation key as the
+        // payload of message 1, where the handshake hash covers it.
+        let (kem, kem_key) = if suite.hybrid() {
+            let (secret, key) = hybrid::generate();
+            (Some(secret), key)
+        } else {
+            (None, Vec::new())
+        };
         let mut buf = [0u8; NOISE_BUF];
-        let len = state.write_message(&[], &mut buf).map_err(noise_err)?;
+        let len = state.write_message(&kem_key, &mut buf).map_err(noise_err)?;
         let message = HandshakeMsg::Init {
             sid: hex::encode(sid),
             offer: config.offer.clone(),
@@ -279,6 +293,7 @@ impl Initiator {
                 suite,
                 state,
                 retried,
+                kem,
             },
             message,
         ))
@@ -338,6 +353,21 @@ impl Initiator {
             return Err(DarmError::Rejected(
                 "authenticated offers select another suite (downgrade attempt?)".into(),
             ));
+        }
+        match (&self.kem, &resp.kem) {
+            (Some(secret), Some(ciphertext)) => {
+                let ciphertext = B64
+                    .decode(ciphertext)
+                    .map_err(|e| DarmError::malformed("handshake kem", e.to_string()))?;
+                let psk = secret.decapsulate(&ciphertext)?;
+                self.state.set_psk(3, &psk[..]).map_err(noise_err)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(DarmError::Rejected(
+                    "ML-KEM ciphertext does not match the suite".into(),
+                ));
+            }
         }
         let bind = Binding::sign(
             config,
@@ -403,13 +433,25 @@ pub fn respond(
     let message = decode_noise(noise)?;
     let mut state = build(config, &sid, suite, offer_i, false)?;
     let mut scratch = [0u8; NOISE_BUF];
-    state
+    let received = state
         .read_message(&message, &mut scratch)
         .map_err(noise_err)?;
+    // Message 1 carries exactly an ML-KEM key for a hybrid suite and
+    // nothing otherwise.
+    let kem = if suite.hybrid() {
+        let (ciphertext, psk) = hybrid::encapsulate(&scratch[..received])?;
+        state.set_psk(3, &psk[..]).map_err(noise_err)?;
+        Some(B64.encode(ciphertext))
+    } else if received != 0 {
+        return Err(DarmError::malformed("handshake", "unexpected payload"));
+    } else {
+        None
+    };
     let bind = Binding::sign(config, &sid, ROLE_RESPONDER, state.get_handshake_hash());
     let payload = serde_json::to_vec(&RespPayload {
         offer: config.offer.clone(),
         bind,
+        kem,
     })
     .map_err(|e| DarmError::malformed("handshake payload", e.to_string()))?;
     let mut buf = [0u8; NOISE_BUF];

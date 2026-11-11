@@ -153,7 +153,7 @@ impl DarmNode {
         now_ms: u64,
     ) -> Result<Self> {
         let compute = ComputeState::new(&config, network_id(&config, &ledger), identity.node_id());
-        let sessions = Sessions::new(config.sessions, compute.hints())?;
+        let sessions = Sessions::new(config.sessions, config.post_quantum, compute.hints())?;
         let role = if ledger.is_validator(&identity.node_id()) {
             Role::Guard
         } else {

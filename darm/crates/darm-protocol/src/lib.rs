@@ -31,6 +31,7 @@
 
 pub mod adaptive;
 pub mod handshake;
+pub mod hybrid;
 pub mod replay;
 pub mod session;
 pub mod suite;
@@ -42,7 +43,7 @@ pub use handshake::{
 };
 pub use replay::ReplayWindow;
 pub use session::{Session, SessionLimits};
-pub use suite::{Codec, Offer, Padding, Selected, Suite, negotiate};
+pub use suite::{Codec, Offer, Padding, PostQuantum, Selected, Suite, negotiate};
 
 /// Largest decoded message the session layer reassembles. Matches the
 /// `darm.v1` channel body limit.

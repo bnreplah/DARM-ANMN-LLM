@@ -983,3 +983,49 @@ fn recall_feedback_changes_ranking_and_shows_in_the_feed() {
     assert!(later.is_empty(), "nothing new since the head");
     assert!(events.iter().any(|e| e.kind == darm_memory::FeedKind::Hurt));
 }
+
+#[test]
+fn hybrid_post_quantum_sessions_carry_gossip_and_mix_with_classical_peers() {
+    use darm_protocol::PostQuantum;
+    let mut config = validator_config(&[1, 2, 3], true);
+    config.post_quantum = PostQuantum::Preferred;
+    // Node 3 has not enabled the hybrid suites.
+    let mut classical = config.clone();
+    classical.post_quantum = PostQuantum::Off;
+    let mut nodes = vec![node(1, config.clone()), node(2, config), node(3, classical)];
+    connect(&mut nodes, NOW);
+    let suite = |node: &DarmNode, peer: &str| -> String {
+        let status = node.sessions.status();
+        let session = status["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["peer"] == peer)
+            .unwrap_or_else(|| panic!("no session with {peer}"))
+            .clone();
+        session["selected"]["suite"].as_str().unwrap().to_string()
+    };
+    assert!(suite(&nodes[0], "peer1").starts_with("hybrid_ml_kem768"));
+    assert!(suite(&nodes[1], "peer0").starts_with("hybrid_ml_kem768"));
+    // With the classical peer both upgraded nodes fall back, and still talk.
+    assert!(suite(&nodes[0], "peer2").starts_with("noise_xx"));
+    assert!(suite(&nodes[2], "peer1").starts_with("noise_xx"));
+
+    let (id, out) = nodes[0]
+        .remember_exchange("where are the runbooks?", "in ops/", "m", "default", NOW)
+        .unwrap();
+    let out = nodes[0].finalize(out, NOW);
+    assert!(out.iter().all(|o| matches!(o.message, Wire::Sealed { .. })));
+    pump(&mut nodes, out.into_iter().map(|o| (0, o)).collect(), NOW);
+    for t in 1..=5 {
+        let mut queue = Vec::new();
+        for (i, n) in nodes.iter_mut().enumerate() {
+            queue.extend(n.tick(NOW + t).into_iter().map(|o| (i, o)));
+        }
+        pump(&mut nodes, queue, NOW + t);
+    }
+    for node in &nodes {
+        assert!(node.memory().get(&id).is_some());
+        assert!(node.ledger().state().is_committed(&id));
+    }
+}

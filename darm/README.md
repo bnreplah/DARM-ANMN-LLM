@@ -336,6 +336,53 @@ handshake with each peer and seals gossip to peers that completed one:
 - Sessions last at most an hour (fresh keys each time), replay windows and
   reassembly are bounded, and a peer may start one handshake per 5 s.
 
+### Hybrid post-quantum sessions
+
+Classical sessions rest on X25519. Someone who records traffic now and later
+has a large quantum computer could recover those session keys. With
+`DARM_SESSION_PQ=preferred` a node also offers hybrid suites that add an
+ML-KEM-768 (FIPS 203) exchange to the same handshake:
+
+```text
+ initiator                                         responder
+ -> e, [ML-KEM encapsulation key]         ───────►
+                                          ◄───────  <- e, ee, s, es, [offer, binding, ML-KEM ciphertext]
+ -> s, se, psk, [binding]                 ───────►   psk = H(ML-KEM shared secret)
+```
+
+- The ML-KEM secret enters Noise as the pre-shared key of message 3
+  (`Noise_XXpsk3`), so the session keys depend on X25519 **and** ML-KEM. An
+  attacker has to break both.
+- The ML-KEM key and ciphertext travel in handshake payloads, so the signed
+  handshake hash covers them: swapping either breaks the handshake.
+- It is negotiated like any other suite. Two upgraded nodes pick a hybrid
+  suite; with a peer that does not offer one they fall back to classical
+  (`preferred`) or refuse the session (`required`).
+
+| `DARM_SESSION_PQ` | Offers | With a classical-only peer |
+|---|---|---|
+| `off` (default) | classical suites | classical session |
+| `preferred` | hybrid first, then classical | classical session |
+| `required` | hybrid only | no session |
+
+What it does not do:
+
+- **Authentication is still classical** (Ed25519 identities, X25519 static
+  keys). A quantum attacker present *during* a handshake could impersonate
+  a node. Recorded traffic stays confidential. Hybrid TLS 1.3 is in the same
+  position.
+- **Signatures elsewhere are unchanged.** Memories, ledger entries and
+  votes are Ed25519.
+- **Every peer must run a version that knows the hybrid suites** before any
+  node enables this, even peers that leave it `off`: an older node cannot
+  parse an offer that lists a suite it has never heard of, and the handshake
+  fails. That is why the default is `off`.
+- The handshake is larger: message 1 goes from 44 to 1,644 base64
+  characters and message 2 from 628 to 2,596, still inside the 8 KiB
+  handshake limit.
+- ML-KEM comes from the RustCrypto `ml-kem` crate, which has not had an
+  independent security audit.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -353,6 +400,7 @@ handshake with each peer and seals gossip to peers that completed one:
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
+| `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. Enable only once every peer runs a version that knows them. See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |
 | `DARM_GPUS` | none | Comma-separated `backend:memory_mb:gflops[:label]`, e.g. `cuda:24576:82000:rtx4090`. |

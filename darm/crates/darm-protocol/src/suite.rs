@@ -27,6 +27,11 @@ pub enum Suite {
     NoiseXxChaChaPoly,
     /// Noise_XX_25519_AESGCM_SHA256: fastest where AES is in hardware.
     NoiseXxAesGcm,
+    /// ChaChaPoly with an added ML-KEM-768 exchange (see [`crate::hybrid`]):
+    /// the session keys depend on X25519 and ML-KEM together.
+    HybridMlKem768ChaChaPoly,
+    /// AES-GCM with an added ML-KEM-768 exchange.
+    HybridMlKem768AesGcm,
 }
 
 impl Suite {
@@ -34,6 +39,28 @@ impl Suite {
         match self {
             Self::NoiseXxChaChaPoly => "Noise_XX_25519_ChaChaPoly_BLAKE2s",
             Self::NoiseXxAesGcm => "Noise_XX_25519_AESGCM_SHA256",
+            // The ML-KEM secret enters as the pre-shared key of message 3.
+            Self::HybridMlKem768ChaChaPoly => "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s",
+            Self::HybridMlKem768AesGcm => "Noise_XXpsk3_25519_AESGCM_SHA256",
+        }
+    }
+
+    /// Whether the suite adds the ML-KEM-768 exchange.
+    pub fn hybrid(self) -> bool {
+        matches!(
+            self,
+            Self::HybridMlKem768ChaChaPoly | Self::HybridMlKem768AesGcm
+        )
+    }
+
+    /// Name committed to in the handshake prologue. Classical suites keep
+    /// their Noise name, so their prologue is unchanged from earlier
+    /// versions; hybrid suites name the KEM as well.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HybridMlKem768ChaChaPoly => "Noise_XXpsk3_25519+MLKEM768_ChaChaPoly_BLAKE2s",
+            Self::HybridMlKem768AesGcm => "Noise_XXpsk3_25519+MLKEM768_AESGCM_SHA256",
+            classical => classical.noise_params(),
         }
     }
 
@@ -41,6 +68,8 @@ impl Suite {
         match self {
             Self::NoiseXxChaChaPoly => 1,
             Self::NoiseXxAesGcm => 2,
+            Self::HybridMlKem768ChaChaPoly => 3,
+            Self::HybridMlKem768AesGcm => 4,
         }
     }
 }
@@ -113,6 +142,21 @@ impl Default for Offer {
     }
 }
 
+/// How an offer treats the hybrid post-quantum suites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostQuantum {
+    /// Classical suites only. The default, because a peer running a version
+    /// that does not know the hybrid suites cannot parse an offer that
+    /// lists them.
+    #[default]
+    Off,
+    /// Hybrid suites first, classical suites as a fallback.
+    Preferred,
+    /// Hybrid suites only: no session with a peer that lacks them.
+    Required,
+}
+
 fn check_list<T: PartialEq>(what: &'static str, items: &[T]) -> Result<()> {
     if items.is_empty() || items.len() > MAX_OFFER_ITEMS {
         return Err(DarmError::malformed(what, "must list 1..=8 options"));
@@ -126,6 +170,34 @@ fn check_list<T: PartialEq>(what: &'static str, items: &[T]) -> Result<()> {
 }
 
 impl Offer {
+    /// The default offer with the given post-quantum policy.
+    pub fn with_post_quantum(policy: PostQuantum) -> Self {
+        Self::default().post_quantum(policy)
+    }
+
+    /// Apply a post-quantum policy to this offer's classical suites,
+    /// keeping their order (so a node that prefers AES still prefers the
+    /// AES hybrid).
+    #[must_use]
+    pub fn post_quantum(mut self, policy: PostQuantum) -> Self {
+        let classical: Vec<Suite> = self
+            .suites
+            .iter()
+            .copied()
+            .filter(|s| !s.hybrid())
+            .collect();
+        let hybrid = classical.iter().map(|suite| match suite {
+            Suite::NoiseXxAesGcm => Suite::HybridMlKem768AesGcm,
+            _ => Suite::HybridMlKem768ChaChaPoly,
+        });
+        self.suites = match policy {
+            PostQuantum::Off => classical,
+            PostQuantum::Preferred => hybrid.chain(classical.iter().copied()).collect(),
+            PostQuantum::Required => hybrid.collect(),
+        };
+        self
+    }
+
     pub fn validate(&self) -> Result<()> {
         check_list("offer suites", &self.suites)?;
         check_list("offer codecs", &self.codecs)?;
