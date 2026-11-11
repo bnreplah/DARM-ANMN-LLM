@@ -1,4 +1,6 @@
 use crate::embed::{Embedder, HashingEmbedder, cosine};
+use crate::feed::{Feed, FeedKind};
+use crate::outcome::{Outcome, Usefulness};
 use crate::record::{MemoryRecord, Scope, SignedMemory, SignedTombstone};
 use darm_core::{DarmError, Hash32, NodeId, NodeIdentity, Result};
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,7 @@ struct Stored {
     recalls: u32,
     last_recalled_ms: u64,
     finalized: bool,
+    usefulness: Usefulness,
 }
 
 impl Stored {
@@ -83,14 +86,24 @@ impl Stored {
         (0.3 + 0.7 * record.importance()) * (0.5 + 0.5 * recency) * rehearsal
     }
 
-    fn maybe_consolidate(&mut self) {
-        if self.tier == Tier::ShortTerm
-            && (self.finalized
-                || self.recalls >= CONSOLIDATION_RECALLS
-                || self.signed.record.importance_milli >= CONSOLIDATION_IMPORTANCE_MILLI)
+    /// Promote to long-term when earned. Returns whether the tier changed.
+    ///
+    /// A memory this node has found harmful is never promoted, whatever its
+    /// importance or ledger status says. Rehearsal alone does not promote a
+    /// memory that has hurt more often than it helped.
+    fn maybe_consolidate(&mut self) -> bool {
+        if self.tier != Tier::ShortTerm || self.usefulness.harmful() {
+            return false;
+        }
+        let rehearsed = self.recalls >= CONSOLIDATION_RECALLS && !self.usefulness.net_negative();
+        if self.finalized
+            || rehearsed
+            || self.signed.record.importance_milli >= CONSOLIDATION_IMPORTANCE_MILLI
         {
             self.tier = Tier::LongTerm;
+            return true;
         }
+        false
     }
 }
 
@@ -101,6 +114,10 @@ pub struct Hit {
     pub similarity: f32,
     pub tier: Tier,
     pub finalized: bool,
+    /// Estimated probability that recalling this memory helps (0.5 when it
+    /// has never been scored), and how many reports that rests on.
+    pub usefulness: f32,
+    pub outcomes: u32,
     pub record: MemoryRecord,
 }
 
@@ -115,6 +132,8 @@ pub struct SearchOptions<'a> {
     pub require_finalized_from_peers: bool,
     /// Only return memories carrying this tag (namespace isolation).
     pub required_tag: Option<&'a str>,
+    /// Also return memories this node has found harmful (for review).
+    pub include_harmful: bool,
 }
 
 impl Default for SearchOptions<'_> {
@@ -126,6 +145,7 @@ impl Default for SearchOptions<'_> {
             trust: &|_| 1.0,
             require_finalized_from_peers: false,
             required_tag: None,
+            include_harmful: false,
         }
     }
 }
@@ -137,6 +157,7 @@ enum LogEvent {
     Insert { memory: SignedMemory, local: bool },
     Tombstone { tombstone: SignedTombstone },
     Finalized { id: Hash32 },
+    Outcome { id: Hash32, outcome: Outcome },
 }
 
 /// Append-only JSONL persistence for the memory store.
@@ -197,6 +218,7 @@ pub struct MemoryStore {
     embedder: Arc<dyn Embedder>,
     limits: MemoryLimits,
     log: Option<MemoryLog>,
+    feed: Feed,
 }
 
 impl MemoryStore {
@@ -208,6 +230,7 @@ impl MemoryStore {
             embedder: Arc::new(HashingEmbedder::default()),
             limits,
             log: None,
+            feed: Feed::default(),
         }
     }
 
@@ -238,11 +261,22 @@ impl MemoryStore {
                     store.apply_tombstone_inner(tombstone)?;
                 }
                 LogEvent::Finalized { id } => {
-                    store.mark_finalized_inner(&id);
+                    store.mark_finalized_inner(&id, 0);
+                }
+                LogEvent::Outcome { id, outcome } => {
+                    // The memory may since have been forgotten or evicted.
+                    if let Some(stored) = store.records.get_mut(&id) {
+                        stored.usefulness.replay(outcome);
+                        if stored.usefulness.harmful() {
+                            stored.tier = Tier::ShortTerm;
+                        }
+                    }
                 }
             }
         }
         store.log = Some(log);
+        // Replay is history, not activity.
+        store.feed = Feed::default();
         Ok(store)
     }
 
@@ -343,9 +377,19 @@ impl MemoryStore {
             recalls: 0,
             last_recalled_ms: 0,
             finalized: false,
+            usefulness: Usefulness::default(),
         };
-        stored.maybe_consolidate();
+        let promoted = stored.maybe_consolidate();
+        let at_ms = stored.signed.record.created_ms;
         self.records.insert(id, stored);
+        let kind = match origin {
+            Origin::Local => FeedKind::Remembered,
+            Origin::Peer => FeedKind::Learned,
+        };
+        self.feed.push(kind, id, at_ms);
+        if promoted {
+            self.feed.push(FeedKind::Consolidated, id, at_ms);
+        }
         Ok(InsertOutcome::Inserted)
     }
 
@@ -419,6 +463,11 @@ impl MemoryStore {
             }
             Some(_) => {
                 self.remove(&tombstone.memory);
+                self.feed.push(
+                    FeedKind::Forgotten,
+                    tombstone.memory,
+                    tombstone.timestamp_ms,
+                );
             }
             // Unknown record: only keep tombstones while there is room, so
             // they cannot be used to fill memory.
@@ -430,23 +479,67 @@ impl MemoryStore {
     }
 
     /// The ledger finalized this memory's commit: consolidate it.
-    pub fn mark_finalized(&mut self, id: &Hash32) -> Result<bool> {
-        let changed = self.mark_finalized_inner(id);
+    pub fn mark_finalized(&mut self, id: &Hash32, now_ms: u64) -> Result<bool> {
+        let changed = self.mark_finalized_inner(id, now_ms);
         if changed && let Some(log) = &self.log {
             log.append(&LogEvent::Finalized { id: *id })?;
         }
         Ok(changed)
     }
 
-    fn mark_finalized_inner(&mut self, id: &Hash32) -> bool {
+    fn mark_finalized_inner(&mut self, id: &Hash32, now_ms: u64) -> bool {
         match self.records.get_mut(id) {
             Some(stored) if !stored.finalized => {
                 stored.finalized = true;
-                stored.maybe_consolidate();
+                let promoted = stored.maybe_consolidate();
+                self.feed.push(FeedKind::Finalized, *id, now_ms);
+                if promoted {
+                    self.feed.push(FeedKind::Consolidated, *id, now_ms);
+                }
                 true
             }
             _ => false,
         }
+    }
+
+    /// Report what happened after a recall. Accepted once per recall of
+    /// that memory. Returns the memory's updated usefulness estimate.
+    ///
+    /// This is the store's learning signal: helpful memories rank higher
+    /// and may consolidate; a memory that keeps hurting is demoted and
+    /// drops out of recall. Reports are local and are not gossiped.
+    pub fn record_outcome(&mut self, id: &Hash32, outcome: Outcome, now_ms: u64) -> Result<f32> {
+        let stored = self
+            .records
+            .get_mut(id)
+            .ok_or_else(|| DarmError::Rejected("unknown memory".into()))?;
+        stored.usefulness.report(outcome)?;
+        let estimate = stored.usefulness.estimate();
+        let demoted = stored.usefulness.harmful() && stored.tier == Tier::LongTerm;
+        if demoted {
+            stored.tier = Tier::ShortTerm;
+        }
+        let promoted = stored.maybe_consolidate();
+        let kind = match outcome {
+            Outcome::Helped => FeedKind::Helped,
+            Outcome::Hurt => FeedKind::Hurt,
+        };
+        self.feed.push(kind, *id, now_ms);
+        if demoted {
+            self.feed.push(FeedKind::Demoted, *id, now_ms);
+        }
+        if promoted {
+            self.feed.push(FeedKind::Consolidated, *id, now_ms);
+        }
+        if let Some(log) = &self.log {
+            log.append(&LogEvent::Outcome { id: *id, outcome })?;
+        }
+        Ok(estimate)
+    }
+
+    /// What the store has been doing lately. See [`crate::feed`].
+    pub fn feed(&self) -> &Feed {
+        &self.feed
     }
 
     /// Associative recall: cosine similarity weighted by memory strength and
@@ -475,6 +568,9 @@ impl MemoryStore {
                 {
                     return None;
                 }
+                if stored.usefulness.harmful() && !options.include_harmful {
+                    return None;
+                }
                 let trust = (options.trust)(&record.author).clamp(0.0, 1.0);
                 if trust <= 0.0 {
                     return None;
@@ -486,10 +582,12 @@ impl MemoryStore {
                 let strength = stored.strength(now_ms).min(1.5) / 1.5;
                 Some(Hit {
                     id: *id,
-                    score: similarity * (0.6 + 0.4 * strength) * trust,
+                    score: similarity * (0.6 + 0.4 * strength) * trust * stored.usefulness.factor(),
                     similarity,
                     tier: stored.tier,
                     finalized: stored.finalized,
+                    usefulness: stored.usefulness.estimate(),
+                    outcomes: stored.usefulness.observations(),
                     record: record.clone(),
                 })
             })
@@ -500,7 +598,12 @@ impl MemoryStore {
             if let Some(stored) = self.records.get_mut(&hit.id) {
                 stored.recalls = stored.recalls.saturating_add(1);
                 stored.last_recalled_ms = now_ms;
-                stored.maybe_consolidate();
+                stored.usefulness.note_recall();
+                let promoted = stored.maybe_consolidate();
+                self.feed.push(FeedKind::Recalled, hit.id, now_ms);
+                if promoted {
+                    self.feed.push(FeedKind::Consolidated, hit.id, now_ms);
+                }
             }
         }
         hits
@@ -552,6 +655,12 @@ impl MemoryStore {
             if stored.finalized {
                 stats.finalized += 1;
             }
+            if stored.usefulness.observations() > 0 {
+                stats.scored += 1;
+            }
+            if stored.usefulness.harmful() {
+                stats.harmful += 1;
+            }
             match stored.origin {
                 Origin::Local => stats.local += 1,
                 Origin::Peer => stats.from_peers += 1,
@@ -570,6 +679,9 @@ pub struct MemoryStats {
     pub local: usize,
     pub from_peers: usize,
     pub tombstones: usize,
+    /// Memories with at least one outcome report, and those found harmful.
+    pub scored: usize,
+    pub harmful: usize,
 }
 
 #[cfg(test)]

@@ -10,14 +10,23 @@
 //! split: new memories start short-term and decay; memories that are recalled
 //! repeatedly, marked important, or finalized on the ledger are consolidated
 //! into long-term storage with a much slower decay.
+//!
+//! Recall is not the same as usefulness. [`outcome`] records whether a
+//! recalled memory helped or hurt, and that record ranks memories, gates
+//! consolidation and demotes the ones that keep hurting. [`feed`] is a
+//! bounded stream of what the store is doing, for live views.
 
 pub mod context;
 pub mod embed;
+pub mod feed;
+pub mod outcome;
 pub mod record;
 pub mod store;
 
 pub use context::render_context;
 pub use embed::{Embedder, HashingEmbedder};
+pub use feed::{Feed, FeedEvent, FeedKind};
+pub use outcome::{Outcome, Usefulness};
 pub use record::{MemoryKind, MemoryRecord, Scope, SignedMemory, SignedTombstone};
 pub use store::{
     Hit, InsertOutcome, MemoryLimits, MemoryLog, MemoryStats, MemoryStore, Origin, SearchOptions,
