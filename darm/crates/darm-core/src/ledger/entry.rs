@@ -78,7 +78,7 @@ pub enum EntryBody {
     },
     /// Issue closed-loop compute credits. Author must be a validator; the
     /// referenced proposal must be `kind = "credit-grant"`, have passed the
-    /// >2/3 validator vote, and carry `credit_grant_payload(to, amount)`.
+    /// two-thirds validator vote, and carry `credit_grant_payload(to, amount)`.
     /// One grant per proposal. Credits cannot be transferred or redeemed;
     /// this is the only way supply is created.
     CreditGrant {
