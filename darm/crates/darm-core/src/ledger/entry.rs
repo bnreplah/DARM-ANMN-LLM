@@ -8,6 +8,27 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_REPUTATION_DELTA_MILLI: i32 = 1_000;
 /// Most shards one pooled compute job may commit.
 pub const MAX_COMPUTE_SHARDS: u32 = 65_536;
+/// Most workers one settlement may pay.
+pub const MAX_SETTLE_PAYEES: usize = 256;
+/// Largest single credit amount (keeps sums far from `u64` overflow).
+pub const MAX_CREDIT_AMOUNT: u64 = 1_000_000_000_000;
+
+/// One payment inside a [`EntryBody::ComputeSettle`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payment {
+    pub worker: NodeId,
+    pub amount: u64,
+}
+
+/// Hash a validator proposal must carry as its payload to authorise a grant.
+pub fn credit_grant_payload(to: &NodeId, amount: u64) -> Hash32 {
+    let mut encoder = Canonical::new("credit-grant");
+    encoder.fixed32(to.as_bytes()).u64(amount);
+    Hash32::digest("credit-grant", encoder.as_bytes())
+}
+
+/// Proposal `kind` that authorises credit grants.
+pub const CREDIT_GRANT_KIND: &str = "credit-grant";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -54,6 +75,24 @@ pub enum EntryBody {
         receipts_root: Hash32,
         shards: u32,
         workers: u16,
+    },
+    /// Issue closed-loop compute credits. Author must be a validator; the
+    /// referenced proposal must be `kind = "credit-grant"`, have passed the
+    /// >2/3 validator vote, and carry `credit_grant_payload(to, amount)`.
+    /// One grant per proposal. Credits cannot be transferred or redeemed;
+    /// this is the only way supply is created.
+    CreditGrant {
+        proposal: Hash32,
+        to: NodeId,
+        amount: u64,
+    },
+    /// Pay the workers of a committed compute job out of the author's own
+    /// balance. Author must be the job's coordinator; `receipts_root` must
+    /// match the commit. Supply is conserved: credits only move.
+    ComputeSettle {
+        job: Hash32,
+        receipts_root: Hash32,
+        payments: Vec<Payment>,
     },
 }
 
@@ -125,6 +164,33 @@ impl EntryBody {
                     .u32(*shards)
                     .u16(*workers);
             }
+            Self::CreditGrant {
+                proposal,
+                to,
+                amount,
+            } => {
+                encoder
+                    .u8(8)
+                    .fixed32(proposal.as_bytes())
+                    .fixed32(to.as_bytes())
+                    .u64(*amount);
+            }
+            Self::ComputeSettle {
+                job,
+                receipts_root,
+                payments,
+            } => {
+                encoder
+                    .u8(9)
+                    .fixed32(job.as_bytes())
+                    .fixed32(receipts_root.as_bytes())
+                    .u32(payments.len() as u32);
+                for payment in payments {
+                    encoder
+                        .fixed32(payment.worker.as_bytes())
+                        .u64(payment.amount);
+                }
+            }
         }
     }
 
@@ -166,6 +232,30 @@ impl EntryBody {
                 }
                 if *workers == 0 {
                     return Err(DarmError::malformed("entry", "compute needs a worker"));
+                }
+                Ok(())
+            }
+            Self::CreditGrant { amount, .. } => {
+                if *amount == 0 || *amount > MAX_CREDIT_AMOUNT {
+                    return Err(DarmError::malformed("entry", "grant amount out of range"));
+                }
+                Ok(())
+            }
+            Self::ComputeSettle { payments, .. } => {
+                if payments.is_empty() || payments.len() > MAX_SETTLE_PAYEES {
+                    return Err(DarmError::malformed("entry", "payee count out of range"));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for payment in payments {
+                    if payment.amount == 0 || payment.amount > MAX_CREDIT_AMOUNT {
+                        return Err(DarmError::malformed("entry", "payment out of range"));
+                    }
+                    if payment.worker == *author {
+                        return Err(DarmError::Rejected("cannot pay yourself".into()));
+                    }
+                    if !seen.insert(payment.worker) {
+                        return Err(DarmError::malformed("entry", "duplicate payee"));
+                    }
                 }
                 Ok(())
             }

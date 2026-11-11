@@ -27,8 +27,9 @@ mod validators;
 
 pub use chain::{Ledger, LedgerLimits, RoundProposal};
 pub use entry::{
-    Attestation, Block, BlockHeader, EntryBody, LedgerEntry, MAX_COMPUTE_SHARDS, SignedEntry,
-    attestation_message, block_proposal_message,
+    Attestation, Block, BlockHeader, CREDIT_GRANT_KIND, EntryBody, LedgerEntry, MAX_COMPUTE_SHARDS,
+    MAX_CREDIT_AMOUNT, MAX_SETTLE_PAYEES, Payment, SignedEntry, attestation_message,
+    block_proposal_message, credit_grant_payload,
 };
 pub use state::{ComputeRecord, LedgerState, ProposalOutcome, ProposalState, Registration};
 pub use validators::{ChainConfig, SecurityPhase, ValidatorSet};

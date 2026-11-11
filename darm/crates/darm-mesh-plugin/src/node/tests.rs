@@ -587,6 +587,9 @@ fn cpus_and_gpus_pool_across_nodes_and_results_reach_the_ledger() {
             .is_err(),
         "only compute commits go through this path"
     );
+    let status = nodes[0].status(NOW);
+    assert_eq!(status["ledger"]["credits"]["mine"], 0);
+    assert_eq!(status["ledger"]["credits"]["transferable"], false);
 }
 
 #[test]
