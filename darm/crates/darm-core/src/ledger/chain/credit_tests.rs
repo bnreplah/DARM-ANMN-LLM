@@ -1,5 +1,7 @@
 use super::*;
-use crate::ledger::{CREDIT_GRANT_KIND, EntryBody, Payment, ValidatorSet, credit_grant_payload};
+use crate::ledger::{
+    CREDIT_GRANT_KIND, EntryBody, Feature, Payment, ValidatorSet, credit_grant_payload,
+};
 
 const NOW: u64 = 1_700_000_000_000;
 
@@ -19,6 +21,7 @@ impl Harness {
         let config = ChainConfig {
             name: "credits".into(),
             validators: ValidatorSet::equal([v.node_id()]).unwrap(),
+            activations: [(crate::ledger::Feature::Credits, 0)].into(),
         };
         Self {
             ledger: Ledger::new(config),
@@ -287,4 +290,63 @@ fn replay_reproduces_balances() {
     let replayed = Ledger::replay(h.ledger.config().clone(), h.ledger.blocks().to_vec()).unwrap();
     assert_eq!(replayed.state().credit_balance(&w1.node_id()), 7);
     assert_eq!(replayed.state().credit_balance(&coord.node_id()), 3);
+}
+
+#[test]
+fn credits_are_refused_before_their_activation_height() {
+    let (mut h, coord, _w1, _w2) = setup();
+    h.grant(&coord, 10);
+    let height_with_grant = h.ledger.height();
+    assert_eq!(h.balance(&coord), 10);
+
+    // A replica scheduled to activate credits later rejects the same blocks.
+    let mut late = h.ledger.config().clone();
+    late.activations
+        .insert(Feature::Credits, height_with_grant + 1);
+    assert!(Ledger::replay(late.clone(), h.ledger.blocks().to_vec()).is_err());
+    // One that never activates them rejects them too.
+    let mut never = late.clone();
+    never.activations.clear();
+    assert!(Ledger::replay(never, h.ledger.blocks().to_vec()).is_err());
+
+    // A live ledger with a future height refuses submission until then.
+    let v = identity(1);
+    let mut config = h.ledger.config().clone();
+    config.activations.insert(Feature::Credits, 3);
+    let mut ledger = Ledger::new(config);
+    let chain = ledger.chain_id();
+    let grant = |nonce_ts: u64| {
+        SignedEntry::sign(
+            &v,
+            chain,
+            EntryBody::CreditGrant {
+                proposal: Hash32::digest("p", b"x"),
+                to: v.node_id(),
+                amount: 1,
+            },
+            nonce_ts,
+        )
+        .unwrap()
+    };
+    let err = ledger.submit(grant(NOW), NOW).unwrap_err();
+    assert!(err.to_string().contains("activates at height 3"), "{err}");
+    assert!(!ledger.config().active(Feature::Credits, 2));
+    assert!(ledger.config().active(Feature::Credits, 3));
+}
+
+#[test]
+fn activation_commitment_tracks_the_schedule() {
+    let v = identity(1);
+    let mut config = ChainConfig::new("c", ValidatorSet::equal([v.node_id()]).unwrap());
+    let empty = config.activations_commitment();
+    config.activations.insert(Feature::Credits, 10);
+    let ten = config.activations_commitment();
+    config.activations.insert(Feature::Credits, 11);
+    assert_ne!(empty, ten);
+    assert_ne!(ten, config.activations_commitment());
+    // The genesis hash does not depend on the schedule.
+    assert_eq!(
+        config.genesis_hash(),
+        ChainConfig::new("c", ValidatorSet::equal([v.node_id()]).unwrap()).genesis_hash()
+    );
 }

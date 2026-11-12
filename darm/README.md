@@ -420,6 +420,7 @@ What it does not do:
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
+| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200`. Must be identical on every validator. See "Closed-loop compute credits". |
 | `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. Enable only once every peer runs a version that knows them. See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |
@@ -549,5 +550,15 @@ review, so the economy is closed-loop by construction):
 Limits: the ledger cannot verify the per-worker amounts (units are in off-ledger
 receipts), so a coordinator chooses who to pay; collusion only moves the
 colluders' own credits. Free grants per identity are not offered because they
-would be Sybil-farmable. New entry types change the canonical encoding, so older
-nodes reject blocks containing them (no activation height yet).
+would be Sybil-farmable.
+
+**Turning credits on.** Credit entries change the canonical encoding, so a node
+built before them rejects any block that contains one. Credits are therefore
+off until the chain schedules them: every validator sets the same
+`DARM_ACTIVATE=credits@<height>`, choosing a height far enough ahead for all
+of them to upgrade. Below that height credit entries are refused at
+submission, never proposed, and a block containing one is rejected. Compare
+`darm_status.ledger.activations_commitment` across validators before the
+height arrives; nodes with different schedules fork at the first height where
+they differ. The schedule is not part of the genesis hash, so a running chain
+can add one.

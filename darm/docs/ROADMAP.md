@@ -11,13 +11,10 @@ Ordered by security value first.
    blocks by Tendermint-style prevote/precommit rounds with locking, durable
    votes, and commit certificates carried in the block, so an equivocating
    proposer costs a round instead of stalling the height. Remaining:
-   - wire encodings and test vectors for `round_proposal`, `round_vote` and
-     `commit_round` in DARM-ANN `spec/PROTOCOL.md`, and re-pin the archive
-     server's `darm-core` so it can verify these blocks;
    - record equivocation evidence as a ledger entry;
    - make `locking` the default once the above has run on a real mesh;
-   - a chain-level activation height, so a switch cannot be done
-     inconsistently by operators.
+   - switch consensus through the activation schedule (`DARM_ACTIVATE`,
+     added for credits) so operators cannot switch inconsistently.
 3. **Validator-set governance.** `Proposal { kind: "validators" }` that, once
    passed, schedules a validator-set change at a future height.
 4. **Hybrid post-quantum signatures.** Add `Signature::Ed25519MlDsa65` (both

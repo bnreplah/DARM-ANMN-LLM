@@ -6,8 +6,10 @@
 //! explicit opt-in, and replication is never proposed automatically.
 
 use darm_compute::{ContributionPolicy, Device, FormFactor, Threshold, WorkloadKind};
+use darm_core::ledger::Feature;
 use darm_core::{DarmError, NodeId, Result};
 use darm_protocol::PostQuantum;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Which rule finalizes ledger blocks. Every validator of a chain must use
@@ -75,6 +77,29 @@ pub fn parse_post_quantum(value: &str) -> Result<PostQuantum> {
     }
 }
 
+/// `DARM_ACTIVATE`: feature activation heights, e.g. `credits@1200`.
+/// Every validator of a chain must use the same schedule.
+pub fn parse_activations(value: &str) -> Result<BTreeMap<Feature, u64>> {
+    let mut out = BTreeMap::new();
+    for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (name, height) = item.split_once('@').ok_or_else(|| {
+            DarmError::Rejected(format!(
+                "DARM_ACTIVATE item {item:?} must be feature@height"
+            ))
+        })?;
+        let feature = Feature::parse(name)
+            .ok_or_else(|| DarmError::Rejected(format!("unknown feature {name:?}")))?;
+        let height: u64 = height
+            .trim()
+            .parse()
+            .map_err(|_| DarmError::Rejected(format!("bad activation height in {item:?}")))?;
+        if out.insert(feature, height).is_some() {
+            return Err(DarmError::Rejected(format!("{name} listed twice")));
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 pub struct DarmConfig {
     pub data_dir: Option<PathBuf>,
@@ -118,6 +143,8 @@ pub struct DarmConfig {
     pub sessions: SessionMode,
     /// Hybrid ML-KEM-768 session suites: off, preferred or required.
     pub post_quantum: PostQuantum,
+    /// Feature activation heights (`DARM_ACTIVATE`). Empty: none active.
+    pub activations: BTreeMap<Feature, u64>,
     pub consensus: ConsensusMode,
     /// New-node weight ramp for the compute pool (Volume 1 §11 VoteWeight).
     pub pool_min_age_ms: u64,
@@ -153,6 +180,7 @@ impl Default for DarmConfig {
             metered: false,
             sessions: SessionMode::Preferred,
             post_quantum: PostQuantum::Off,
+            activations: BTreeMap::new(),
             consensus: ConsensusMode::OneVote,
             pool_min_age_ms: darm_compute::pool::DEFAULT_MIN_AGE_MS,
             admission_threshold: Threshold::TWO_THIRDS,
@@ -318,6 +346,10 @@ impl DarmConfig {
                 Ok(value) => parse_post_quantum(&value)?,
                 Err(_) => defaults.post_quantum,
             },
+            activations: match std::env::var("DARM_ACTIVATE") {
+                Ok(value) => parse_activations(&value)?,
+                Err(_) => defaults.activations,
+            },
             consensus: match std::env::var("DARM_CONSENSUS") {
                 Ok(value) => ConsensusMode::parse(&value)?,
                 Err(_) => defaults.consensus,
@@ -356,6 +388,16 @@ pub fn validate_archive_url(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_schedules_parse_and_reject_garbage() {
+        let parsed = parse_activations(" credits@1200 ").unwrap();
+        assert_eq!(parsed.get(&Feature::Credits), Some(&1200));
+        assert!(parse_activations("").unwrap().is_empty());
+        for bad in ["credits", "credits@x", "warp@5", "credits@1,credits@2"] {
+            assert!(parse_activations(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn thresholds_parse_and_must_exceed_half() {

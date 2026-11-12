@@ -32,4 +32,4 @@ pub use entry::{
     block_proposal_message, credit_grant_payload,
 };
 pub use state::{ComputeRecord, LedgerState, ProposalOutcome, ProposalState, Registration};
-pub use validators::{ChainConfig, SecurityPhase, ValidatorSet};
+pub use validators::{ChainConfig, Feature, SecurityPhase, ValidatorSet};

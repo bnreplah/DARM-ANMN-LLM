@@ -1009,6 +1009,10 @@ impl DarmNode {
                 "max_faulty_validators": validators.max_faulty(),
                 "committed_memories": ledger.state().committed_memories(),
                 "registered_nodes": ledger.state().registrations().count(),
+                "activations": ledger.config().activations.iter()
+                    .map(|(f, h)| (f.name().to_string(), json!({"height": h, "active": ledger.config().active(*f, ledger.height() + 1)})))
+                    .collect::<serde_json::Map<_, _>>(),
+                "activations_commitment": ledger.config().activations_commitment(),
                 "credits": {
                     "mine": ledger.state().credit_balance(&self.node_id()),
                     "issued": ledger.state().credits_issued(),
@@ -1050,6 +1054,7 @@ fn chain_config(config: &DarmConfig, identity: &NodeIdentity) -> Result<ChainCon
             .clone()
             .unwrap_or_else(|| format!("darm-local-{}", identity.node_id().short())),
         validators,
+        activations: config.activations.clone(),
     })
 }
 

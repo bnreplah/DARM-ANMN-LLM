@@ -17,6 +17,7 @@ fn config(ids: &[NodeIdentity]) -> ChainConfig {
     ChainConfig {
         name: "locking-test".into(),
         validators: ValidatorSet::equal(ids.iter().map(NodeIdentity::node_id)).unwrap(),
+        activations: Default::default(),
     }
 }
 

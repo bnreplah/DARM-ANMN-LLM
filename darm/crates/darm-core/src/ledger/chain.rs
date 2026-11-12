@@ -144,12 +144,26 @@ impl Ledger {
 
     /// Admit a signed entry to the pending pool. Returns `Ok(false)` when it
     /// is already known, so gossip handlers can stop re-broadcasting it.
+    /// Reject entries whose feature is not active at `height`.
+    fn admits(&self, entry: &SignedEntry, height: u64) -> Result<()> {
+        match entry.entry.body.feature() {
+            Some(feature) if !self.config.active(feature, height) => Err(DarmError::Rejected(
+                match self.config.activations.get(&feature) {
+                    Some(from) => format!("{} activates at height {from}", feature.name()),
+                    None => format!("{} is not activated on this chain", feature.name()),
+                },
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub fn submit(&mut self, entry: SignedEntry, now_ms: u64) -> Result<bool> {
         let id = entry.id();
         if self.contains_entry(&id) {
             return Ok(false);
         }
         entry.verify(&self.chain_id)?;
+        self.admits(&entry, self.height() + 1)?;
         if entry.entry.timestamp_ms > now_ms.saturating_add(self.limits.max_clock_skew_ms) {
             return Err(DarmError::Rejected(
                 "entry timestamp is in the future".into(),
@@ -195,7 +209,10 @@ impl Ledger {
             if chosen.len() >= self.limits.max_entries_per_block {
                 break;
             }
-            match scratch.apply(entry, timestamp_ms, &self.config.validators) {
+            let admitted = self.admits(entry, self.height() + 1);
+            match admitted
+                .and_then(|()| scratch.apply(entry, timestamp_ms, &self.config.validators))
+            {
                 Ok(()) => chosen.push(entry.clone()),
                 Err(_) => rejected.push(*key),
             }
@@ -451,6 +468,7 @@ impl Ledger {
             {
                 return Err(DarmError::Rejected("entry is newer than its block".into()));
             }
+            self.admits(entry, header.height)?;
             state.apply(entry, header.timestamp_ms, &self.config.validators)?;
         }
         Ok(state)
