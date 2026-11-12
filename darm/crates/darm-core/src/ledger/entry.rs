@@ -1,3 +1,4 @@
+use super::locking::{Vote, VoteKind, vote_message};
 use crate::canonical::Canonical;
 use crate::{DarmError, Hash32, NodeId, NodeIdentity, Result, Signature, merkle};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,39 @@ pub fn credit_grant_payload(to: &NodeId, amount: u64) -> Hash32 {
     let mut encoder = Canonical::new("credit-grant");
     encoder.fixed32(to.as_bytes()).u64(amount);
     Hash32::digest("credit-grant", encoder.as_bytes())
+}
+
+/// Reputation a validator loses for each recorded equivocation.
+pub const EQUIVOCATION_PENALTY_MILLI: i64 = 1_000;
+
+fn encode_vote(encoder: &mut Canonical, vote: &Vote) {
+    let Signature::Ed25519(signature) = &vote.signature;
+    encoder
+        .u8(match vote.kind {
+            VoteKind::Prevote => 1,
+            VoteKind::Precommit => 2,
+        })
+        .u64(vote.height)
+        .u32(vote.round)
+        .opt_fixed32(vote.block.as_ref().map(Hash32::as_bytes))
+        .fixed32(vote.validator.as_bytes())
+        .bytes(signature);
+}
+
+/// Check that two votes prove equivocation on `chain`: same validator, kind,
+/// height and round, different blocks, both correctly signed.
+pub fn verify_equivocation(chain: &Hash32, first: &Vote, second: &Vote) -> Result<()> {
+    for vote in [first, second] {
+        let message = vote_message(
+            chain,
+            vote.kind,
+            vote.height,
+            vote.round,
+            vote.block.as_ref(),
+        );
+        vote.validator.verify(&message, &vote.signature)?;
+    }
+    Ok(())
 }
 
 /// Proposal `kind` that authorises credit grants.
@@ -94,6 +128,11 @@ pub enum EntryBody {
         receipts_root: Hash32,
         payments: Vec<Payment>,
     },
+    /// Proof that a validator signed two different votes of one kind in one
+    /// round. Anyone may submit it; the signatures are the proof. `first`
+    /// is the vote whose block sorts lower (nil first), so each offence has
+    /// exactly one valid encoding.
+    Equivocation { first: Vote, second: Vote },
 }
 
 impl EntryBody {
@@ -101,6 +140,7 @@ impl EntryBody {
     pub fn feature(&self) -> Option<super::Feature> {
         match self {
             Self::CreditGrant { .. } | Self::ComputeSettle { .. } => Some(super::Feature::Credits),
+            Self::Equivocation { .. } => Some(super::Feature::Evidence),
             _ => None,
         }
     }
@@ -199,6 +239,11 @@ impl EntryBody {
                         .u64(payment.amount);
                 }
             }
+            Self::Equivocation { first, second } => {
+                encoder.u8(10);
+                encode_vote(encoder, first);
+                encode_vote(encoder, second);
+            }
         }
     }
 
@@ -264,6 +309,25 @@ impl EntryBody {
                     if !seen.insert(payment.worker) {
                         return Err(DarmError::malformed("entry", "duplicate payee"));
                     }
+                }
+                Ok(())
+            }
+            Self::Equivocation { first, second } => {
+                if first.validator != second.validator
+                    || first.kind != second.kind
+                    || first.height != second.height
+                    || first.round != second.round
+                {
+                    return Err(DarmError::malformed(
+                        "entry",
+                        "votes are not from one validator, kind, height and round",
+                    ));
+                }
+                if first.block >= second.block {
+                    return Err(DarmError::malformed(
+                        "entry",
+                        "votes must differ and be in canonical order",
+                    ));
                 }
                 Ok(())
             }

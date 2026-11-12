@@ -1,4 +1,8 @@
-use super::entry::{CREDIT_GRANT_KIND, EntryBody, Payment, SignedEntry, credit_grant_payload};
+use super::entry::{
+    CREDIT_GRANT_KIND, EQUIVOCATION_PENALTY_MILLI, EntryBody, Payment, SignedEntry,
+    credit_grant_payload,
+};
+use super::locking::VoteKind;
 use super::validators::ValidatorSet;
 use crate::{DarmError, Hash32, NodeId, Result};
 use serde::{Deserialize, Serialize};
@@ -83,6 +87,8 @@ pub struct LedgerState {
     credits: BTreeMap<NodeId, u64>,
     granted: BTreeSet<Hash32>,
     settled: BTreeSet<(NodeId, Hash32)>,
+    /// Recorded equivocations: (validator, height, round, kind).
+    equivocations: BTreeSet<(NodeId, u64, u32, VoteKind)>,
     issued: u64,
 }
 
@@ -247,6 +253,20 @@ impl LedgerState {
                 receipts_root,
                 payments,
             } => self.apply_settle(author, job, receipts_root, payments)?,
+            EntryBody::Equivocation { first, .. } => {
+                // Signatures were checked against the chain id before apply
+                // (Ledger::admits); here only state rules remain.
+                if !validators.contains(&first.validator) {
+                    return Err(DarmError::Rejected("not a current validator".into()));
+                }
+                let key = (first.validator, first.height, first.round, first.kind);
+                if !self.equivocations.insert(key) {
+                    return Err(DarmError::Duplicate);
+                }
+                let next = (self.reputation(&first.validator) - EQUIVOCATION_PENALTY_MILLI)
+                    .clamp(REPUTATION_MIN_MILLI, REPUTATION_MAX_MILLI);
+                self.reputation.insert(first.validator, next);
+            }
         }
         Ok(())
     }
@@ -342,6 +362,14 @@ impl LedgerState {
             self.credits.insert(worker, balance);
         }
         Ok(())
+    }
+
+    /// Equivocations recorded against `validator`.
+    pub fn equivocations(&self, validator: &NodeId) -> usize {
+        self.equivocations
+            .iter()
+            .filter(|(v, ..)| v == validator)
+            .count()
     }
 
     /// Spendable credits. Non-transferable: only [`EntryBody::ComputeSettle`]

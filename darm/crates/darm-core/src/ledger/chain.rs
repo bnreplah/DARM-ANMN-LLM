@@ -153,7 +153,12 @@ impl Ledger {
                     None => format!("{} is not activated on this chain", feature.name()),
                 },
             )),
-            _ => Ok(()),
+            _ => match &entry.entry.body {
+                super::EntryBody::Equivocation { first, second } => {
+                    super::entry::verify_equivocation(&self.chain_id, first, second)
+                }
+                _ => Ok(()),
+            },
         }
     }
 
@@ -537,5 +542,7 @@ pub use rounds::RoundProposal;
 
 #[cfg(test)]
 mod credit_tests;
+#[cfg(test)]
+mod evidence_tests;
 #[cfg(test)]
 mod tests;

@@ -11,8 +11,8 @@ use super::{DarmNode, ROUND_TIMEOUT_MS};
 use crate::config::ConsensusMode;
 use crate::wire::{Outbound, Wire};
 use darm_core::Result;
-use darm_core::ledger::RoundProposal;
 use darm_core::ledger::locking::{Action, Vote};
+use darm_core::ledger::{EntryBody, Feature, RoundProposal};
 
 impl DarmNode {
     pub(super) fn locking(&self) -> bool {
@@ -68,7 +68,7 @@ impl DarmNode {
                 message: Box::new(message),
             }));
         }
-        out.append(&mut self.after_round_actions(actions)?);
+        out.append(&mut self.after_round_actions(actions, now_ms)?);
         Ok(out)
     }
 
@@ -102,7 +102,7 @@ impl DarmNode {
             Wire::RoundProposal { message } if ledger_gossip => {
                 self.on_round_proposal(source, *message, now_ms)
             }
-            Wire::RoundVote { vote } if ledger_gossip => self.on_round_vote(source, vote),
+            Wire::RoundVote { vote } if ledger_gossip => self.on_round_vote(source, vote, now_ms),
             _ => Ok(Vec::new()),
         }
     }
@@ -118,16 +118,16 @@ impl DarmNode {
         }
         let voter = self.votes().then_some(&self.identity);
         let actions = self.ledger.on_round_proposal(voter, message, now_ms)?;
-        self.after_round_actions(actions)
+        self.after_round_actions(actions, now_ms)
     }
 
-    fn on_round_vote(&mut self, source: &str, vote: Vote) -> Result<Vec<Outbound>> {
+    fn on_round_vote(&mut self, source: &str, vote: Vote, now_ms: u64) -> Result<Vec<Outbound>> {
         if let Some(request) = self.behind(source, vote.height) {
             return Ok(vec![request]);
         }
         let voter = self.votes().then_some(&self.identity);
         let actions = self.ledger.on_round_vote(voter, vote)?;
-        self.after_round_actions(actions)
+        self.after_round_actions(actions, now_ms)
     }
 
     /// Fire the timer for the current `(height, round, step)` when it has
@@ -156,12 +156,45 @@ impl DarmNode {
         let voter = self.votes().then_some(&self.identity);
         let actions = self.ledger.on_round_timeout(voter, key.1, key.2)?;
         self.round_timer = None;
-        self.after_round_actions(actions)
+        self.after_round_actions(actions, now_ms)
+    }
+
+    /// Put equivocation evidence on the ledger once the chain has activated
+    /// the `evidence` feature. Failures (duplicate evidence, feature not
+    /// active, a peer already reported it) are expected and only logged.
+    fn report_equivocation(&mut self, pair: (Vote, Vote), now_ms: u64) -> Vec<Outbound> {
+        let next = self.ledger.height() + 1;
+        if !self.ledger.config().active(Feature::Evidence, next) {
+            return Vec::new();
+        }
+        let (first, second) = if pair.0.block < pair.1.block {
+            pair
+        } else {
+            (pair.1, pair.0)
+        };
+        let body = EntryBody::Equivocation { first, second };
+        let entry = match self.sign_entry(body, now_ms) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(%error, "darm could not sign equivocation evidence");
+                return Vec::new();
+            }
+        };
+        match self.ledger.submit(entry.clone(), now_ms) {
+            Ok(true) if self.ledger_gossip() => {
+                vec![Outbound::broadcast(Wire::LedgerEntry { entry })]
+            }
+            Ok(_) => Vec::new(),
+            Err(error) => {
+                tracing::debug!(%error, "darm equivocation evidence not submitted");
+                Vec::new()
+            }
+        }
     }
 
     /// Carry out what the ledger asked for. Votes are persisted before they
     /// are queued for sending; a vote that cannot be persisted is not sent.
-    fn after_round_actions(&mut self, actions: Vec<Action>) -> Result<Vec<Outbound>> {
+    fn after_round_actions(&mut self, actions: Vec<Action>, now_ms: u64) -> Result<Vec<Outbound>> {
         let gossip = self.ledger_gossip();
         let mut out = Vec::new();
         for action in actions {
@@ -181,6 +214,7 @@ impl DarmNode {
                         round = pair.0.round,
                         "darm validator signed two different votes in one round"
                     );
+                    out.extend(self.report_equivocation(*pair, now_ms));
                 }
                 Action::EnterRound(_) => self.round_timer = None,
                 Action::Commit { .. } => {}

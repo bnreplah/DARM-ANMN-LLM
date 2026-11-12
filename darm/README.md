@@ -293,7 +293,12 @@ splits the vote, and since nobody may vote twice the height never finishes.
   nodes. Nodes that decide relay the commit certificate.
 - **Evidence.** Two different signed votes of one kind from one validator in
   one round are returned as an equivocation pair: proof of misbehaviour that
-  anyone can check.
+  anyone can check. With `DARM_ACTIVATE=evidence@<height>` the node that sees
+  it submits an `Equivocation` entry (tag 10). Any node may author one: both
+  votes are re-verified against the chain id, must share validator, kind,
+  height and round, differ in block, and come in canonical order. Each
+  offence is recorded once, and the validator loses 1.0 reputation. Removing
+  the validator still needs a governed validator-set change.
 - **Bounds.** Votes are accepted only from validators, for this height, at
   most 16 rounds ahead; one vote per validator per round and kind is kept.
 
@@ -420,7 +425,7 @@ What it does not do:
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
-| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200`. Must be identical on every validator. See "Closed-loop compute credits". |
+| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`. Must be identical on every validator. See "Closed-loop compute credits". |
 | `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. Enable only once every peer runs a version that knows them. See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |

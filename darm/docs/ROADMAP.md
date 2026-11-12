@@ -11,7 +11,8 @@ Ordered by security value first.
    blocks by Tendermint-style prevote/precommit rounds with locking, durable
    votes, and commit certificates carried in the block, so an equivocating
    proposer costs a round instead of stalling the height. Remaining:
-   - record equivocation evidence as a ledger entry;
+   - act on recorded equivocation (`Equivocation` entries exist behind the
+     `evidence` feature): remove or suspend the validator through governance;
    - make `locking` the default once the above has run on a real mesh;
    - switch consensus through the activation schedule (`DARM_ACTIVATE`,
      added for credits) so operators cannot switch inconsistently.
