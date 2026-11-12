@@ -1213,3 +1213,52 @@ fn sampled_audit_confirms_honest_work_and_overturns_a_colluding_quorum() {
         assert!(plan.assigned(2, who));
     }
 }
+
+#[test]
+fn equivocating_validator_is_recorded_on_every_replica() {
+    use darm_core::ledger::Feature;
+    use darm_core::ledger::locking::{Vote, VoteKind, vote_message};
+
+    let mut config = locking_config(&[1, 2, 3, 4]);
+    config.activations.insert(Feature::Evidence, 0);
+    let mut nodes: Vec<DarmNode> = (1..=4).map(|s| node(s, config.clone())).collect();
+    for t in 0..=6 {
+        tick_all(&mut nodes, NOW + t, &[]);
+    }
+    let chain = nodes[0].ledger().chain_id();
+    let height = nodes[0].ledger().height() + 1;
+    let round = nodes[0].ledger().locking().unwrap().round();
+    // Validator 4 signs two prevotes for different blocks in one round.
+    let cheat = identity(4);
+    let signed = |block: Hash32| {
+        let message = vote_message(&chain, VoteKind::Prevote, height, round, Some(&block));
+        Vote {
+            kind: VoteKind::Prevote,
+            height,
+            round,
+            block: Some(block),
+            validator: cheat.node_id(),
+            signature: cheat.sign(&message),
+        }
+    };
+    let mut queue = Vec::new();
+    for block in [Hash32::digest("x", b"1"), Hash32::digest("x", b"2")] {
+        let vote = signed(block);
+        let body =
+            serde_json::to_vec(&Outbound::broadcast(Wire::RoundVote { vote }).message).unwrap();
+        for reply in nodes[0].handle("peer3", Wire::decode(&body).unwrap(), NOW + 7) {
+            queue.push((0, reply));
+        }
+    }
+    assert_eq!(nodes[0].counters.equivocations, 1);
+    assert_eq!(nodes[0].ledger().pending_len(), 1, "evidence submitted");
+    pump_live(&mut nodes, queue, NOW + 7, &[]);
+    for t in 8..=40 {
+        tick_all(&mut nodes, NOW + t * ROUND_TIMEOUT_MS, &[]);
+    }
+    let head = nodes[0].ledger().head_hash();
+    for n in &nodes {
+        assert_eq!(n.ledger().head_hash(), head, "replicas agree");
+        assert_eq!(n.ledger().state().equivocations(&cheat.node_id()), 1);
+    }
+}

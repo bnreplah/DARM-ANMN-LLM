@@ -135,14 +135,17 @@ impl ValidatorSet {
 pub enum Feature {
     /// Closed-loop compute credits (`CreditGrant`, `ComputeSettle`).
     Credits,
+    /// Equivocation evidence against validators (`Equivocation`).
+    Evidence,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 1] = [Feature::Credits];
+    pub const ALL: [Feature; 2] = [Feature::Credits, Feature::Evidence];
 
     pub fn name(self) -> &'static str {
         match self {
             Feature::Credits => "credits",
+            Feature::Evidence => "evidence",
         }
     }
 
