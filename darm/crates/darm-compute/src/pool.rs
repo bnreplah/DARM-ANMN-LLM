@@ -417,6 +417,12 @@ impl ComputePool {
         self.members.is_empty()
     }
 
+    /// Every pool member, in node-id order (a stable candidate list for
+    /// audit selection).
+    pub fn nodes(&self) -> Vec<NodeId> {
+        self.members.keys().copied().collect()
+    }
+
     pub fn advert(&self, node: &NodeId) -> Option<&SignedAdvert> {
         self.members.get(node).map(|m| &m.advert)
     }

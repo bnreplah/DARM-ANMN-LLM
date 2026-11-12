@@ -51,14 +51,13 @@ Ordered by security value first.
     acts at the sender's queue; on an ordered carrier (TCP) bytes already
     sent cannot be overtaken. A QUIC carrier with one stream per sync class
     removes that head-of-line blocking.
-14. **Fabric in CI.** `darm-ci.yml` still lists only the original four
-    crates; `darm-compute`, `darm-protocol` and `darm-fabric` are not yet
-    gated there.
-15. **Sampled audits in the node.** `darm_compute::audit` selects and
-    settles audits from `(job, receipts_root, beacon)`. Remaining: a ledger
-    entry that publishes `receipts_root` before the beacon block, plugin
-    operations to request and collect audit receipts, feeding outcomes into
-    worker trust, and a verifiable random function for the beacon.
+15. **Sampled audits: remaining work.** The node now plans, collects and
+    resolves audits (`darm_compute_audit_*`), using a later finalized block
+    as the beacon and feeding outcomes into worker trust. Remaining:
+    recording an overturned job on the ledger (today the commit stands there
+    and is only flagged locally), publishing audit verdicts as reputation
+    reports so other nodes learn from them, automatic auditor dispatch, and a
+    verifiable random function for the beacon.
 16. **Outcome learning beyond one node.** `darm_memory_outcome` scores
     memories from the caller's reports, locally. Remaining: have the chat
     path report outcomes automatically (for example from user corrections),

@@ -1032,3 +1032,184 @@ fn hybrid_post_quantum_sessions_carry_gossip_and_mix_with_classical_peers() {
         assert!(node.ledger().state().is_committed(&id));
     }
 }
+
+#[test]
+fn sampled_audit_confirms_honest_work_and_overturns_a_colluding_quorum() {
+    use crate::audit_ops::{self, AuditPlanArgs, AuditReportArgs, AuditResolveArgs};
+    use darm_compute::SignedReceipt;
+
+    let base = DarmConfig {
+        pool_min_age_ms: 0,
+        ..DarmConfig::default()
+    };
+    let mut nodes: Vec<DarmNode> = (1..=8).map(|i| node(i, base.clone())).collect();
+    for node in &mut nodes {
+        node.tick(NOW);
+    }
+    connect(&mut nodes, NOW);
+    let coordinator = nodes[0].node_id();
+    let spec = darm_compute::JobSpec {
+        workload: darm_compute::WorkloadKind::Embedding,
+        device: darm_compute::DevicePreference::Any,
+        inputs: (0..4u8).map(|i| Hash32::digest("in", &[i])).collect(),
+        redundancy: 3,
+        min_memory_mb: 0,
+        allow_mobile: false,
+        same_kind_replicas: false,
+        threshold: darm_compute::Threshold::TWO_THIRDS,
+        spot_check_milli: 0,
+        diverse_replicas: true,
+        sync_class: darm_compute::SyncClass::Async,
+        nonce: 7,
+    };
+    let plan = {
+        let n = &nodes[0];
+        let trust = |peer: &NodeId| n.compute_trust(peer);
+        let rtt = |peer: &NodeId| n.rtt_to(peer);
+        let context = darm_compute::PlanContext {
+            trust: &trust,
+            rtt_ms: &rtt,
+        };
+        n.compute
+            .pool
+            .plan(spec, coordinator, &context, NOW)
+            .unwrap()
+    };
+    nodes[0].compute.remember_plan(plan.clone());
+    let index_of =
+        |nodes: &[DarmNode], id: &NodeId| nodes.iter().position(|n| n.node_id() == *id).unwrap();
+    let truth = |shard: u32| Hash32::digest("out", &shard.to_be_bytes());
+    // Shard 2's whole replica set colludes on a wrong output; the quorum
+    // accepts it, which redundancy alone cannot detect.
+    let wrong = Hash32::digest("wrong", b"colluding");
+    let sign = |nodes: &[DarmNode], who: &NodeId, shard: u32, output: Hash32| {
+        let device = plan
+            .assignments
+            .iter()
+            .find(|a| a.shard == shard && a.worker == *who)
+            .map(|a| (a.device, a.backend))
+            .unwrap_or((darm_compute::DeviceKind::Cpu, darm_compute::Backend::Cpu));
+        SignedReceipt::sign(
+            nodes[index_of(nodes, who)].identity(),
+            darm_compute::WorkReceipt {
+                job: plan.job,
+                shard,
+                worker: *who,
+                input: plan.spec.inputs[shard as usize],
+                output,
+                device: device.0,
+                backend: device.1,
+                units: 100,
+                elapsed_ms: 50,
+                completed_ms: NOW,
+            },
+        )
+        .unwrap()
+    };
+    let worker_receipts: Vec<SignedReceipt> = plan
+        .assignments
+        .iter()
+        .map(|a| {
+            let output = if a.shard == 2 { wrong } else { truth(a.shard) };
+            sign(&nodes, &a.worker, a.shard, output)
+        })
+        .collect();
+    let result = darm_compute::tally(&plan, &worker_receipts);
+    assert!(result.complete);
+    nodes[0]
+        .commit_compute(result.commit_body().unwrap(), NOW)
+        .unwrap();
+    nodes[0].tick(NOW + 1);
+
+    let receipts_json: Vec<Value> = worker_receipts
+        .iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect();
+    let job = plan.job.to_string();
+    let args = |beacon_height| AuditPlanArgs {
+        job: job.clone(),
+        receipts: receipts_json.clone(),
+        beacon_height,
+        rate_milli: 1_000,
+    };
+    // No beacon yet: the commit's own block cannot seed its audit.
+    assert!(audit_ops::plan(&mut nodes[0], args(99)).is_err());
+    let commit_height = nodes[0].ledger().height();
+    assert!(audit_ops::plan(&mut nodes[0], args(commit_height)).is_err());
+
+    // A later block supplies the beacon.
+    let other = Hash32::digest("job", b"another");
+    nodes[0]
+        .commit_compute(
+            EntryBody::ComputeCommit {
+                job: other,
+                result_root: Hash32::ZERO,
+                receipts_root: Hash32::ZERO,
+                shards: 1,
+                workers: 1,
+            },
+            NOW + 5_000,
+        )
+        .unwrap();
+    nodes[0].tick(NOW + 5_000);
+    let height = nodes[0].ledger().height();
+    assert!(height >= 2);
+    let planned = audit_ops::plan(&mut nodes[0], args(height)).unwrap();
+    let assignments = planned["assignments"].as_array().unwrap();
+    assert_eq!(assignments.len(), 4, "rate 1000 audits every shard");
+    for a in assignments {
+        let auditor: NodeId = serde_json::from_value(a["auditor"].clone()).unwrap();
+        let shard = a["shard"].as_u64().unwrap() as u32;
+        assert!(!plan.assigned(shard, &auditor), "auditors never self-audit");
+    }
+
+    // Auditors recompute the true outputs.
+    let audit_receipts: Vec<Value> = assignments
+        .iter()
+        .map(|a| {
+            let auditor: NodeId = serde_json::from_value(a["auditor"].clone()).unwrap();
+            let shard = a["shard"].as_u64().unwrap() as u32;
+            serde_json::to_value(sign(&nodes, &auditor, shard, truth(shard))).unwrap()
+        })
+        .collect();
+    let report = audit_ops::report(
+        &mut nodes[0],
+        AuditReportArgs {
+            job: job.clone(),
+            receipts: audit_receipts,
+        },
+    )
+    .unwrap();
+    assert_eq!(report["outcome"]["clean"], false);
+    let escalation = report["escalation"].as_array().unwrap();
+    assert_eq!(
+        escalation.len(),
+        1,
+        "only the colluded shard is contradicted"
+    );
+    assert_eq!(escalation[0]["shard"], 2);
+
+    let escalated: Vec<NodeId> = serde_json::from_value(escalation[0]["auditors"].clone()).unwrap();
+    assert_eq!(escalated.len(), 3);
+    let settle_receipts: Vec<Value> = escalated
+        .iter()
+        .map(|who| serde_json::to_value(sign(&nodes, who, 2, truth(2))).unwrap())
+        .collect();
+    let settled = audit_ops::settle(
+        &mut nodes[0],
+        AuditResolveArgs {
+            job,
+            shard: 2,
+            receipts: settle_receipts,
+        },
+    )
+    .unwrap();
+    assert_eq!(settled["resolution"]["status"], "overturned");
+    assert_eq!(settled["commit_stands"], false);
+    let penalised: Vec<NodeId> =
+        serde_json::from_value(settled["trust_penalised"].clone()).unwrap();
+    assert_eq!(penalised.len(), 3, "every signer of the wrong output");
+    for who in &penalised {
+        assert!(plan.assigned(2, who));
+    }
+}
