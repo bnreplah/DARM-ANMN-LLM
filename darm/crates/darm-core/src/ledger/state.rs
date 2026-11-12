@@ -1,4 +1,4 @@
-use super::entry::{CREDIT_GRANT_KIND, EntryBody, SignedEntry, credit_grant_payload};
+use super::entry::{CREDIT_GRANT_KIND, EntryBody, Payment, SignedEntry, credit_grant_payload};
 use super::validators::ValidatorSet;
 use crate::{DarmError, Hash32, NodeId, Result};
 use serde::{Deserialize, Serialize};
@@ -234,86 +234,112 @@ impl LedgerState {
                 proposal,
                 to,
                 amount,
-            } => {
-                if !validators.contains(&author) {
-                    return Err(DarmError::Unauthorized("only validators grant".into()));
-                }
-                let Some(state) = self.proposals.get(proposal) else {
-                    return Err(DarmError::Rejected("unknown proposal".into()));
-                };
-                if state.kind != CREDIT_GRANT_KIND
-                    || state.payload != credit_grant_payload(to, *amount)
-                {
-                    return Err(DarmError::Rejected(
-                        "proposal does not authorise this grant".into(),
-                    ));
-                }
-                if state.outcome(validators, block_timestamp_ms) != ProposalOutcome::Passed {
-                    return Err(DarmError::Rejected("grant proposal has not passed".into()));
-                }
-                if !self.granted.insert(*proposal) {
-                    return Err(DarmError::Duplicate);
-                }
-                let balance = self.credit_balance(to);
-                let (Some(balance), Some(issued)) = (
-                    balance.checked_add(*amount),
-                    self.issued.checked_add(*amount),
-                ) else {
-                    self.granted.remove(proposal);
-                    return Err(DarmError::LimitExceeded("credit supply".into()));
-                };
-                self.credits.insert(*to, balance);
-                self.issued = issued;
-            }
+            } => self.apply_grant(
+                author,
+                proposal,
+                to,
+                *amount,
+                block_timestamp_ms,
+                validators,
+            )?,
             EntryBody::ComputeSettle {
                 job,
                 receipts_root,
                 payments,
-            } => {
-                let key = (author, *job);
-                let Some(record) = self.compute.get(&key) else {
-                    return Err(DarmError::Rejected(
-                        "no committed job by this author".into(),
-                    ));
-                };
-                if record.receipts_root != *receipts_root {
-                    return Err(DarmError::Rejected("receipts root mismatch".into()));
-                }
-                if payments.len() > usize::from(record.workers) {
-                    return Err(DarmError::Rejected("more payees than workers".into()));
-                }
-                if self.settled.contains(&key) {
-                    return Err(DarmError::Duplicate);
-                }
-                if payments
-                    .iter()
-                    .any(|p| !self.registrations.contains_key(&p.worker))
-                {
-                    return Err(DarmError::Rejected("payee is not registered".into()));
-                }
-                let total: u64 = payments.iter().map(|p| p.amount).sum();
-                if self.credit_balance(&author) < total {
-                    return Err(DarmError::Rejected("insufficient credits".into()));
-                }
-                // Totals are bounded by the issued supply, which is checked at
-                // grant time, so these additions cannot overflow; verify anyway
-                // before mutating so a failure leaves state untouched.
-                let mut next = Vec::with_capacity(payments.len());
-                for payment in payments {
-                    let Some(balance) = self
-                        .credit_balance(&payment.worker)
-                        .checked_add(payment.amount)
-                    else {
-                        return Err(DarmError::LimitExceeded("credit balance".into()));
-                    };
-                    next.push((payment.worker, balance));
-                }
-                self.settled.insert(key);
-                *self.credits.entry(author).or_insert(0) -= total;
-                for (worker, balance) in next {
-                    self.credits.insert(worker, balance);
-                }
-            }
+            } => self.apply_settle(author, job, receipts_root, payments)?,
+        }
+        Ok(())
+    }
+
+    fn apply_grant(
+        &mut self,
+        author: NodeId,
+        proposal: &Hash32,
+        to: &NodeId,
+        amount: u64,
+        block_timestamp_ms: u64,
+        validators: &ValidatorSet,
+    ) -> Result<()> {
+        let amount = &amount;
+        if !validators.contains(&author) {
+            return Err(DarmError::Unauthorized("only validators grant".into()));
+        }
+        let Some(state) = self.proposals.get(proposal) else {
+            return Err(DarmError::Rejected("unknown proposal".into()));
+        };
+        if state.kind != CREDIT_GRANT_KIND || state.payload != credit_grant_payload(to, *amount) {
+            return Err(DarmError::Rejected(
+                "proposal does not authorise this grant".into(),
+            ));
+        }
+        if state.outcome(validators, block_timestamp_ms) != ProposalOutcome::Passed {
+            return Err(DarmError::Rejected("grant proposal has not passed".into()));
+        }
+        if !self.granted.insert(*proposal) {
+            return Err(DarmError::Duplicate);
+        }
+        let balance = self.credit_balance(to);
+        let (Some(balance), Some(issued)) = (
+            balance.checked_add(*amount),
+            self.issued.checked_add(*amount),
+        ) else {
+            self.granted.remove(proposal);
+            return Err(DarmError::LimitExceeded("credit supply".into()));
+        };
+        self.credits.insert(*to, balance);
+        self.issued = issued;
+        Ok(())
+    }
+
+    fn apply_settle(
+        &mut self,
+        author: NodeId,
+        job: &Hash32,
+        receipts_root: &Hash32,
+        payments: &[Payment],
+    ) -> Result<()> {
+        let key = (author, *job);
+        let Some(record) = self.compute.get(&key) else {
+            return Err(DarmError::Rejected(
+                "no committed job by this author".into(),
+            ));
+        };
+        if record.receipts_root != *receipts_root {
+            return Err(DarmError::Rejected("receipts root mismatch".into()));
+        }
+        if payments.len() > usize::from(record.workers) {
+            return Err(DarmError::Rejected("more payees than workers".into()));
+        }
+        if self.settled.contains(&key) {
+            return Err(DarmError::Duplicate);
+        }
+        if payments
+            .iter()
+            .any(|p| !self.registrations.contains_key(&p.worker))
+        {
+            return Err(DarmError::Rejected("payee is not registered".into()));
+        }
+        let total: u64 = payments.iter().map(|p| p.amount).sum();
+        if self.credit_balance(&author) < total {
+            return Err(DarmError::Rejected("insufficient credits".into()));
+        }
+        // Totals are bounded by the issued supply, which is checked at
+        // grant time, so these additions cannot overflow; verify anyway
+        // before mutating so a failure leaves state untouched.
+        let mut next = Vec::with_capacity(payments.len());
+        for payment in payments {
+            let Some(balance) = self
+                .credit_balance(&payment.worker)
+                .checked_add(payment.amount)
+            else {
+                return Err(DarmError::LimitExceeded("credit balance".into()));
+            };
+            next.push((payment.worker, balance));
+        }
+        self.settled.insert(key);
+        *self.credits.entry(author).or_insert(0) -= total;
+        for (worker, balance) in next {
+            self.credits.insert(worker, balance);
         }
         Ok(())
     }
