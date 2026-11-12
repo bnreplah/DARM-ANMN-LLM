@@ -255,8 +255,13 @@ impl DarmNode {
         body: EntryBody,
         now_ms: u64,
     ) -> Result<(Hash32, Vec<Outbound>)> {
-        if !matches!(body, EntryBody::ComputeCommit { .. }) {
-            return Err(DarmError::Rejected("not a compute commit".into()));
+        if !matches!(
+            body,
+            EntryBody::ComputeCommit { .. } | EntryBody::ComputeSettle { .. }
+        ) {
+            return Err(DarmError::Rejected(
+                "not a compute commit or settlement".into(),
+            ));
         }
         let entry = self.sign_entry(body, now_ms)?;
         let id = entry.id();
@@ -1004,6 +1009,11 @@ impl DarmNode {
                 "max_faulty_validators": validators.max_faulty(),
                 "committed_memories": ledger.state().committed_memories(),
                 "registered_nodes": ledger.state().registrations().count(),
+                "credits": {
+                    "mine": ledger.state().credit_balance(&self.node_id()),
+                    "issued": ledger.state().credits_issued(),
+                    "transferable": false,
+                },
                 "proposals": proposals,
             },
             "memory": self.memory.stats(),

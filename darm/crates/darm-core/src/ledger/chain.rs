@@ -518,4 +518,6 @@ mod rounds;
 pub use rounds::RoundProposal;
 
 #[cfg(test)]
+mod credit_tests;
+#[cfg(test)]
 mod tests;

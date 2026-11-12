@@ -226,8 +226,8 @@ hypothesis).
 
 Not implemented here, by design or pending evidence: the privacy plane's
 onion routing (Vol. 1.1 §4 flags its missing content-policy layer as the
-design's largest open gap), token settlement and staking (Vol. 1.1 §9 legal
-review items), and a measured ρ for real validators (Paper 2 §6, the
+design's largest open gap), tradeable tokens and staking (Vol. 1.1 §9 legal
+review items; closed-loop credits below are deliberately not these), and a measured ρ for real validators (Paper 2 §6, the
 central open experiment).
 
 ## Consensus: how a block becomes final
@@ -504,3 +504,30 @@ cargo clippy -p darm-fabric --all-targets -- -D warnings
 See [`UPSTREAM.md`](UPSTREAM.md) for how the mesh-llm sources were imported
 and how to sync them, and [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is
 next.
+
+## Closed-loop compute credits
+
+Credits pay workers for pooled compute. They are built so they cannot behave
+like a tradeable asset (securities-law exposure was flagged in the design
+review, so the economy is closed-loop by construction):
+
+- **Only two ways to move them.** `CreditGrant` creates credits; `ComputeSettle`
+  moves them from a job's coordinator to that job's workers. There is no
+  transfer entry and no redemption, so credits cannot be sold or cashed out
+  through the ledger.
+- **Issuance is governed.** A grant needs a validator author, a passed `>2/3`
+  proposal of kind `credit-grant` whose payload commits to `(recipient, amount)`,
+  and is usable once per proposal. Total issued always equals the sum of balances
+  (tested).
+- **Settlement is tied to proof of work.** The coordinator must have a finalized
+  `ComputeCommit` for the job, `receipts_root` must match it, payees must be
+  registered, at most one payee per worker in the commit, no self-payment, one
+  settlement per job, and no overspend.
+- `darm_status.ledger.credits` shows your balance, total issued, and
+  `transferable: false`.
+
+Limits: the ledger cannot verify the per-worker amounts (units are in off-ledger
+receipts), so a coordinator chooses who to pay; collusion only moves the
+colluders' own credits. Free grants per identity are not offered because they
+would be Sybil-farmable. New entry types change the canonical encoding, so older
+nodes reject blocks containing them (no activation height yet).
