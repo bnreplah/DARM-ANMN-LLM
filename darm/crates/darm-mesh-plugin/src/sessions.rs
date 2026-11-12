@@ -10,6 +10,7 @@ use crate::wire::{Outbound, Wire};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use darm_core::{DarmError, Hash32, NodeId, NodeIdentity, Result};
+use darm_protocol::PostQuantum;
 use darm_protocol::adaptive::{hardware_aes, local_offer};
 use darm_protocol::{
     AdaptiveController, DeviceHints, HandshakeConfig, HandshakeMsg, Initiator, PendingResponder,
@@ -40,6 +41,8 @@ pub struct Sessions {
     pub mode: SessionMode,
     static_key: StaticKey,
     aes: bool,
+    /// Whether hybrid ML-KEM suites are offered.
+    post_quantum: PostQuantum,
     pub hints: DeviceHints,
     sessions: HashMap<String, Session>,
     initiating: HashMap<String, PendingInit>,
@@ -53,11 +56,12 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn new(mode: SessionMode, hints: DeviceHints) -> Result<Self> {
+    pub fn new(mode: SessionMode, post_quantum: PostQuantum, hints: DeviceHints) -> Result<Self> {
         Ok(Self {
             mode,
             static_key: StaticKey::generate()?,
             aes: hardware_aes(),
+            post_quantum,
             hints,
             sessions: HashMap::new(),
             initiating: HashMap::new(),
@@ -71,12 +75,16 @@ impl Sessions {
         })
     }
 
+    fn offer(&self) -> darm_protocol::Offer {
+        local_offer(&self.hints, self.aes).post_quantum(self.post_quantum)
+    }
+
     fn config<'a>(&'a self, identity: &'a NodeIdentity, network: Hash32) -> HandshakeConfig<'a> {
         HandshakeConfig {
             identity,
             static_key: &self.static_key,
             network,
-            offer: local_offer(&self.hints, self.aes),
+            offer: self.offer(),
             limits: SessionLimits::default(),
         }
     }
@@ -460,7 +468,8 @@ impl Sessions {
             "mode": self.mode,
             "hardware_aes": self.aes,
             "hints": self.hints,
-            "local_offer": local_offer(&self.hints, self.aes),
+            "post_quantum": self.post_quantum,
+            "local_offer": self.offer(),
             "established": self.sessions.len(),
             "pending": self.initiating.len() + self.responding.len(),
             "known_peers": self.known_peers.len(),

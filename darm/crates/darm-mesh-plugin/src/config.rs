@@ -7,6 +7,7 @@
 
 use darm_compute::{ContributionPolicy, Device, FormFactor, Threshold, WorkloadKind};
 use darm_core::{DarmError, NodeId, Result};
+use darm_protocol::PostQuantum;
 use std::path::PathBuf;
 
 /// Which rule finalizes ledger blocks. Every validator of a chain must use
@@ -62,6 +63,18 @@ impl SessionMode {
     }
 }
 
+/// `DARM_SESSION_PQ`: whether sessions offer the hybrid ML-KEM suites.
+pub fn parse_post_quantum(value: &str) -> Result<PostQuantum> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => Ok(PostQuantum::Off),
+        "preferred" | "on" | "1" | "true" => Ok(PostQuantum::Preferred),
+        "required" | "strict" => Ok(PostQuantum::Required),
+        other => Err(DarmError::Rejected(format!(
+            "DARM_SESSION_PQ must be off|preferred|required, got {other:?}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DarmConfig {
     pub data_dir: Option<PathBuf>,
@@ -103,6 +116,8 @@ pub struct DarmConfig {
     /// Start in a metered-network state (phones on cellular).
     pub metered: bool,
     pub sessions: SessionMode,
+    /// Hybrid ML-KEM-768 session suites: off, preferred or required.
+    pub post_quantum: PostQuantum,
     pub consensus: ConsensusMode,
     /// New-node weight ramp for the compute pool (Volume 1 §11 VoteWeight).
     pub pool_min_age_ms: u64,
@@ -137,6 +152,7 @@ impl Default for DarmConfig {
             policy: ContributionPolicy::for_form_factor(FormFactor::Server),
             metered: false,
             sessions: SessionMode::Preferred,
+            post_quantum: PostQuantum::Off,
             consensus: ConsensusMode::OneVote,
             pool_min_age_ms: darm_compute::pool::DEFAULT_MIN_AGE_MS,
             admission_threshold: Threshold::TWO_THIRDS,
@@ -297,6 +313,10 @@ impl DarmConfig {
             sessions: match std::env::var("DARM_SESSIONS") {
                 Ok(value) => SessionMode::parse(&value)?,
                 Err(_) => defaults.sessions,
+            },
+            post_quantum: match std::env::var("DARM_SESSION_PQ") {
+                Ok(value) => parse_post_quantum(&value)?,
+                Err(_) => defaults.post_quantum,
             },
             consensus: match std::env::var("DARM_CONSENSUS") {
                 Ok(value) => ConsensusMode::parse(&value)?,

@@ -229,3 +229,213 @@ fn expired_sessions_refuse_to_seal() {
     assert!(sa.expired(later));
     assert!(sa.seal(b"x", later).is_err());
 }
+
+// ------------------------------------------------ hybrid post-quantum
+
+use crate::PostQuantum;
+
+fn pq(policy: PostQuantum) -> Offer {
+    Offer::with_post_quantum(policy)
+}
+
+fn round_trip(sa: &mut Session, sb: &mut Session) {
+    let frames = sa.seal(b"over the hybrid session", NOW).unwrap();
+    let mut got = None;
+    for frame in frames {
+        got = sb.open(&frame, NOW).unwrap();
+    }
+    assert_eq!(got.unwrap(), b"over the hybrid session");
+}
+
+#[test]
+fn hybrid_suite_is_selected_when_both_sides_offer_it() {
+    for (first, expected) in [
+        (
+            Suite::HybridMlKem768ChaChaPoly,
+            Suite::HybridMlKem768ChaChaPoly,
+        ),
+        (Suite::HybridMlKem768AesGcm, Suite::HybridMlKem768AesGcm),
+    ] {
+        let mut offer = pq(PostQuantum::Preferred);
+        offer.suites.retain(|s| *s != first);
+        offer.suites.insert(0, first);
+        let a = Side::new(1, offer.clone());
+        let b = Side::new(2, offer);
+        let (mut sa, mut sb) = handshake(&a, &b).unwrap();
+        assert_eq!(sa.selected().suite, expected);
+        assert!(sa.selected().suite.hybrid());
+        assert_eq!(sa.peer(), b.identity.node_id());
+        assert_eq!(sb.peer(), a.identity.node_id());
+        round_trip(&mut sa, &mut sb);
+        round_trip(&mut sb, &mut sa);
+    }
+}
+
+#[test]
+fn hybrid_preferred_falls_back_to_classical_with_a_classical_peer() {
+    let modern = Side::new(1, pq(PostQuantum::Preferred));
+    let classical = Side::new(2, Offer::default());
+    for (a, b) in [(&modern, &classical), (&classical, &modern)] {
+        let (mut sa, mut sb) = handshake(a, b).unwrap();
+        assert!(!sa.selected().suite.hybrid());
+        round_trip(&mut sa, &mut sb);
+    }
+}
+
+#[test]
+fn hybrid_required_refuses_a_classical_peer() {
+    let strict = Side::new(1, pq(PostQuantum::Required));
+    let classical = Side::new(2, Offer::default());
+    assert!(handshake(&strict, &classical).is_err());
+    assert!(handshake(&classical, &strict).is_err());
+    let other = Side::new(3, pq(PostQuantum::Preferred));
+    assert!(
+        handshake(&strict, &other)
+            .unwrap()
+            .0
+            .selected()
+            .suite
+            .hybrid()
+    );
+}
+
+/// Run a hybrid handshake, letting `tamper` edit message 1's Noise bytes.
+fn hybrid_with_tampered_init(tamper: impl Fn(&mut Vec<u8>)) -> Result<(Session, Session)> {
+    let a = Side::new(1, pq(PostQuantum::Required));
+    let b = Side::new(2, pq(PostQuantum::Required));
+    let (initiator, init) = Initiator::start(&a.config())?;
+    let HandshakeMsg::Init {
+        sid,
+        offer,
+        suite,
+        noise,
+    } = init
+    else {
+        unreachable!()
+    };
+    let mut bytes = B64.decode(noise).unwrap();
+    tamper(&mut bytes);
+    let noise = B64.encode(bytes);
+    let ResponderStep::Continue(pending, HandshakeMsg::Resp { noise, .. }) =
+        respond(&b.config(), &sid, &offer, suite, &noise)?
+    else {
+        unreachable!()
+    };
+    let (session_a, fin) = initiator.on_resp(&a.config(), &noise, NOW)?;
+    let HandshakeMsg::Fin { noise, .. } = fin else {
+        unreachable!()
+    };
+    Ok((session_a, pending.on_fin(&b.config(), &noise, NOW)?))
+}
+
+#[test]
+fn the_ml_kem_key_is_bound_to_the_handshake() {
+    // Untouched, the helper completes.
+    assert!(hybrid_with_tampered_init(|_| {}).is_ok());
+    // An attacker who swaps or alters the encapsulation key in flight
+    // (to learn the ML-KEM secret) breaks the handshake instead.
+    assert!(
+        hybrid_with_tampered_init(|bytes| {
+            let last = bytes.len() - 20;
+            bytes[last] ^= 1;
+        })
+        .is_err()
+    );
+    assert!(
+        hybrid_with_tampered_init(|bytes| {
+            let (_, replacement) = crate::hybrid::generate();
+            let start = bytes.len() - replacement.len();
+            bytes[start..].copy_from_slice(&replacement);
+        })
+        .is_err()
+    );
+    // A truncated key is refused outright.
+    assert!(hybrid_with_tampered_init(|bytes| bytes.truncate(40)).is_err());
+}
+
+#[test]
+fn a_classical_handshake_must_not_carry_a_payload_in_message_one() {
+    let a = Side::new(1, Offer::default());
+    let b = Side::new(2, Offer::default());
+    let (_, init) = Initiator::start(&a.config()).unwrap();
+    let HandshakeMsg::Init {
+        sid,
+        offer,
+        suite,
+        noise,
+    } = init
+    else {
+        unreachable!()
+    };
+    let mut bytes = B64.decode(noise).unwrap();
+    bytes.extend_from_slice(&[7; 32]);
+    assert!(respond(&b.config(), &sid, &offer, suite, &B64.encode(bytes)).is_err());
+}
+
+#[test]
+fn hybrid_handshake_messages_fit_the_wire_limits() {
+    let a = Side::new(1, pq(PostQuantum::Required));
+    let b = Side::new(2, pq(PostQuantum::Required));
+    let (initiator, init) = Initiator::start(&a.config()).unwrap();
+    let HandshakeMsg::Init {
+        sid,
+        offer,
+        suite,
+        noise: init_noise,
+    } = init
+    else {
+        unreachable!()
+    };
+    let ResponderStep::Continue(
+        _,
+        HandshakeMsg::Resp {
+            noise: resp_noise, ..
+        },
+    ) = respond(&b.config(), &sid, &offer, suite, &init_noise).unwrap()
+    else {
+        unreachable!()
+    };
+    assert!(
+        init_noise.len() <= MAX_HANDSHAKE_BYTES,
+        "init is {}",
+        init_noise.len()
+    );
+    assert!(
+        resp_noise.len() <= MAX_HANDSHAKE_BYTES,
+        "resp is {}",
+        resp_noise.len()
+    );
+    drop(initiator);
+}
+
+#[test]
+fn session_keys_depend_on_the_ml_kem_secret() {
+    // Give the initiator a different ML-KEM secret after its key was sent.
+    // Every X25519 value is unchanged and correct, yet the two sides now
+    // hold different pre-shared keys, and message 3 must fail to open. So
+    // knowing the X25519 secrets alone is not enough to complete or read
+    // the session.
+    let a = Side::new(1, pq(PostQuantum::Required));
+    let b = Side::new(2, pq(PostQuantum::Required));
+    let (mut initiator, init) = Initiator::start(&a.config()).unwrap();
+    let HandshakeMsg::Init {
+        sid,
+        offer,
+        suite,
+        noise,
+    } = init
+    else {
+        unreachable!()
+    };
+    let ResponderStep::Continue(pending, HandshakeMsg::Resp { noise, .. }) =
+        respond(&b.config(), &sid, &offer, suite, &noise).unwrap()
+    else {
+        unreachable!()
+    };
+    initiator.kem = Some(crate::hybrid::generate().0);
+    let (_, fin) = initiator.on_resp(&a.config(), &noise, NOW).unwrap();
+    let HandshakeMsg::Fin { noise, .. } = fin else {
+        unreachable!()
+    };
+    assert!(pending.on_fin(&b.config(), &noise, NOW).is_err());
+}
