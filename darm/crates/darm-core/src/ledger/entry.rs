@@ -97,6 +97,14 @@ pub enum EntryBody {
 }
 
 impl EntryBody {
+    /// The feature that must be active for this entry to be valid, if any.
+    pub fn feature(&self) -> Option<super::Feature> {
+        match self {
+            Self::CreditGrant { .. } | Self::ComputeSettle { .. } => Some(super::Feature::Credits),
+            _ => None,
+        }
+    }
+
     fn encode(&self, encoder: &mut Canonical) {
         match self {
             Self::NodeRegistration {

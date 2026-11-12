@@ -128,6 +128,31 @@ impl ValidatorSet {
     }
 }
 
+/// Protocol features whose entries change the canonical encoding. Every
+/// replica must activate each one at the same height, or they fork there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    /// Closed-loop compute credits (`CreditGrant`, `ComputeSettle`).
+    Credits,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 1] = [Feature::Credits];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::Credits => "credits",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|f| f.name() == value.trim().to_ascii_lowercase())
+    }
+}
+
 /// Static chain parameters every participant must share.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainConfig {
@@ -135,9 +160,42 @@ pub struct ChainConfig {
     /// signature so entries cannot be replayed on another chain.
     pub name: String,
     pub validators: ValidatorSet,
+    /// Height from which each feature's entries are valid. A feature that is
+    /// absent never activates. Not part of the genesis hash, so a running
+    /// chain can schedule an upgrade; compare [`ChainConfig::activations_commitment`]
+    /// across nodes before the height arrives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub activations: BTreeMap<Feature, u64>,
 }
 
 impl ChainConfig {
+    /// A chain with no scheduled feature activations.
+    pub fn new(name: impl Into<String>, validators: ValidatorSet) -> Self {
+        Self {
+            name: name.into(),
+            validators,
+            activations: BTreeMap::new(),
+        }
+    }
+
+    /// Whether `feature` is active in the block at `height`.
+    pub fn active(&self, feature: Feature, height: u64) -> bool {
+        self.activations
+            .get(&feature)
+            .is_some_and(|from| height >= *from)
+    }
+
+    /// Hash of the activation schedule; nodes that disagree will fork at the
+    /// earliest height where their schedules differ.
+    pub fn activations_commitment(&self) -> Hash32 {
+        let mut encoder = Canonical::new("activations");
+        encoder.u32(self.activations.len() as u32);
+        for (feature, height) in &self.activations {
+            encoder.bytes(feature.name().as_bytes()).u64(*height);
+        }
+        Hash32::digest("activations", encoder.as_bytes())
+    }
+
     pub fn chain_id(&self) -> Hash32 {
         Hash32::digest("chain-id", self.name.as_bytes())
     }

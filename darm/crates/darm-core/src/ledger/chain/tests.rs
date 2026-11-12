@@ -12,6 +12,7 @@ fn config(validators: &[&NodeIdentity]) -> ChainConfig {
     ChainConfig {
         name: "test-mesh".into(),
         validators: ValidatorSet::equal(validators.iter().map(|v| v.node_id())).unwrap(),
+        activations: Default::default(),
     }
 }
 
