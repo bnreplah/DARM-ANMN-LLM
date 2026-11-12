@@ -200,8 +200,28 @@ that, and is not implemented); auditors re-run whole shards, so this does not
 reach the roughly 1% overhead of schemes that check sampled hidden states;
 being caught currently costs reputation only, since there is no stake to
 slash; and auditors that share an operator with the worker can confirm a
-wrong result. The module is a library today: the plugin's compute operations
-do not call it yet.
+wrong result.
+
+**In the node.** The coordinator drives it with three operations. The
+receipts root is already on the ledger (the job's `ComputeCommit`), so it was
+fixed before the beacon existed:
+
+- `darm_compute_audit_plan {job, receipts, beacon_height, rate_milli}` checks
+  that the receipts reproduce the committed `receipts_root`, takes the hash of
+  the finalized block at `beacon_height` as the beacon (the block's timestamp
+  must be later than the commit's), and returns the audited shards and
+  auditors.
+- `darm_compute_audit_report {job, receipts}` compares the auditors' signed
+  receipts with the accepted outputs and names escalation auditors for any
+  contradicted shard.
+- `darm_compute_audit_resolve {job, shard, receipts}` settles it by majority
+  of the escalation auditors. If the first auditor was wrong, that auditor's
+  trust drops; if the accepted output was wrong, every worker that signed it
+  loses trust and the response says `commit_stands: false`. The ledger commit
+  is not revoked, and trust is local to the coordinator.
+
+Auditor candidates are the compute pool's members, so the pool's Sybil limits
+apply (the new-node ramp, sponsorship caps).
 
 ## Whitepaper alignment
 

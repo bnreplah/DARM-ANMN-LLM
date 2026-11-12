@@ -22,6 +22,7 @@
 //!   with sealed, padded frames and link/device-aware tuning.
 
 pub mod archive;
+pub mod audit_ops;
 pub mod chat;
 pub mod compute;
 pub mod compute_ops;

@@ -3,17 +3,29 @@
 
 use crate::config::DarmConfig;
 use darm_compute::advert::{MAX_TTL_MS, MeshBinding};
+use darm_compute::audit::{AuditPlan, Resolution};
 use darm_compute::{
     CapabilityAdvert, ComputePool, ComputeProfile, Conditions, JobPlan, ShardSizer, SignedAdvert,
     Thermal,
 };
-use darm_core::{Hash32, NodeIdentity, Result};
+use darm_core::{Hash32, NodeId, NodeIdentity, Result};
 use darm_protocol::DeviceHints;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 pub const ADVERT_INTERVAL_MS: u64 = 60_000;
 const MAX_PLANS: usize = 64;
+
+/// A sampled audit this node is running for a job it coordinated.
+#[derive(Debug, Clone)]
+pub struct AuditRecord {
+    pub plan: AuditPlan,
+    /// Workers whose receipts carried each shard's accepted output.
+    pub signers: Vec<(u32, NodeId)>,
+    /// Extra auditors asked to settle a contradicted shard.
+    pub escalated: BTreeMap<u32, Vec<NodeId>>,
+    pub resolved: BTreeMap<u32, Resolution>,
+}
 
 pub struct ComputeState {
     pub enabled: bool,
@@ -30,6 +42,7 @@ pub struct ComputeState {
     last_advert_ms: u64,
     dirty: bool,
     plans: VecDeque<JobPlan>,
+    audits: VecDeque<AuditRecord>,
 }
 
 impl ComputeState {
@@ -58,6 +71,7 @@ impl ComputeState {
             last_advert_ms: 0,
             dirty: true,
             plans: VecDeque::new(),
+            audits: VecDeque::new(),
         }
     }
 
@@ -129,6 +143,22 @@ impl ComputeState {
             self.plans.pop_front();
         }
         self.plans.push_back(plan);
+    }
+
+    pub fn remember_audit(&mut self, record: AuditRecord) {
+        self.audits.retain(|a| a.plan.job != record.plan.job);
+        if self.audits.len() >= MAX_PLANS {
+            self.audits.pop_front();
+        }
+        self.audits.push_back(record);
+    }
+
+    pub fn audit(&self, job: &Hash32) -> Option<&AuditRecord> {
+        self.audits.iter().find(|a| a.plan.job == *job)
+    }
+
+    pub fn audit_mut(&mut self, job: &Hash32) -> Option<&mut AuditRecord> {
+        self.audits.iter_mut().find(|a| a.plan.job == *job)
     }
 
     pub fn plan(&self, job: &Hash32) -> Option<&JobPlan> {
