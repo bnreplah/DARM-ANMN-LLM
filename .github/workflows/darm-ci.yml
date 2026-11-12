@@ -18,7 +18,7 @@ env:
   # The upstream mesh-llm .cargo/config.toml wraps rustc with sccache, which
   # these runners do not install. An empty wrapper disables it.
   RUSTC_WRAPPER: ""
-  DARM_CRATES: -p darm-core -p darm-memory -p darm-swarm -p darm-mesh-plugin
+  DARM_CRATES: -p darm-core -p darm-memory -p darm-swarm -p darm-compute -p darm-protocol -p darm-fabric -p darm-mesh-plugin
 
 jobs:
   darm:
