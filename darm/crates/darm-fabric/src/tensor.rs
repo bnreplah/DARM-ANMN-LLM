@@ -131,11 +131,10 @@ impl Tensor {
     /// The values as `f32`, dequantizing if needed.
     pub fn to_f32(&self) -> Vec<f32> {
         match self.dtype {
-            DType::F32 => self
-                .data
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
+            DType::F32 => {
+                let (words, _) = self.data.as_chunks::<4>();
+                words.iter().map(|b| f32::from_le_bytes(*b)).collect()
+            }
             DType::I8 => self
                 .data
                 .iter()
