@@ -254,8 +254,16 @@ impl LedgerState {
                 if !self.granted.insert(*proposal) {
                     return Err(DarmError::Duplicate);
                 }
-                *self.credits.entry(*to).or_insert(0) += amount;
-                self.issued += amount;
+                let balance = self.credit_balance(to);
+                let (Some(balance), Some(issued)) = (
+                    balance.checked_add(*amount),
+                    self.issued.checked_add(*amount),
+                ) else {
+                    self.granted.remove(proposal);
+                    return Err(DarmError::LimitExceeded("credit supply".into()));
+                };
+                self.credits.insert(*to, balance);
+                self.issued = issued;
             }
             EntryBody::ComputeSettle {
                 job,
@@ -287,10 +295,23 @@ impl LedgerState {
                 if self.credit_balance(&author) < total {
                     return Err(DarmError::Rejected("insufficient credits".into()));
                 }
+                // Totals are bounded by the issued supply, which is checked at
+                // grant time, so these additions cannot overflow; verify anyway
+                // before mutating so a failure leaves state untouched.
+                let mut next = Vec::with_capacity(payments.len());
+                for payment in payments {
+                    let Some(balance) = self
+                        .credit_balance(&payment.worker)
+                        .checked_add(payment.amount)
+                    else {
+                        return Err(DarmError::LimitExceeded("credit balance".into()));
+                    };
+                    next.push((payment.worker, balance));
+                }
                 self.settled.insert(key);
                 *self.credits.entry(author).or_insert(0) -= total;
-                for payment in payments {
-                    *self.credits.entry(payment.worker).or_insert(0) += payment.amount;
+                for (worker, balance) in next {
+                    self.credits.insert(worker, balance);
                 }
             }
         }
