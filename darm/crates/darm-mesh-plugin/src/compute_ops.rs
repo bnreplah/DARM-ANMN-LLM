@@ -211,7 +211,7 @@ fn plan_job(node: &mut crate::node::DarmNode, args: PlanArgs) -> Result<Value, P
         "sync_class": plan.spec.sync_class,
         "spot_checked_shards": spot_checked,
         "mean_backend_diversity": plan.mean_backend_diversity(),
-        "security_phase": node.ledger().config().validators.security_phase(),
+        "security_phase": node.ledger().validators().security_phase(),
         "guarantees": {
             "note": "agreement is consensus-validated, not ground truth (Volume 1 §45)",
             "per_shard": ModeledAdmission::new(

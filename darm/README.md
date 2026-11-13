@@ -298,7 +298,25 @@ splits the vote, and since nobody may vote twice the height never finishes.
   votes are re-verified against the chain id, must share validator, kind,
   height and round, differ in block, and come in canonical order. Each
   offence is recorded once, and the validator loses 1.0 reputation. Removing
-  the validator still needs a governed validator-set change.
+  the validator takes a governed validator-set change (below).
+
+**Changing the validator set.** With `DARM_ACTIVATE=governance@<height>`:
+
+1. a validator submits a `Proposal` of kind `validator-set` whose payload is
+   `validator_set_payload(members, effective_height)`: the full new set
+   (node ids and weights, sorted by id) and the height it applies from;
+2. validators vote; it needs the usual more-than-two-thirds of the *current*
+   set's weight;
+3. any current validator submits `ValidatorSetChange { proposal, members,
+   effective_height }` with exactly the approved members and height.
+
+The effective height must be at least 2 blocks after the block that enacts
+it, so every replica knows the new set before that height starts. From
+then on the new set proposes, attests and votes; block headers commit to it,
+replay and the archive derive it from the ledger, and a removed validator's
+attestations are rejected. Changes take effect in height order and each
+proposal enacts once. `darm_status.ledger.validator_changes` lists them;
+the config's `DARM_VALIDATORS` stays the genesis set.
 - **Bounds.** Votes are accepted only from validators, for this height, at
   most 16 rounds ahead; one vote per validator per round and kind is kept.
 
@@ -438,7 +456,7 @@ What it does not do:
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
-| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`. Must be identical on every validator. See "Closed-loop compute credits". |
+| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`, `governance`. Must be identical on every validator. See "Closed-loop compute credits". |
 | `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. `preferred` is safe with older peers (they negotiate classical). See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |

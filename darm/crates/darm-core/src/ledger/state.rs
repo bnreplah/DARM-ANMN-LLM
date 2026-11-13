@@ -1,6 +1,6 @@
 use super::entry::{
-    CREDIT_GRANT_KIND, EQUIVOCATION_PENALTY_MILLI, EntryBody, Payment, SignedEntry,
-    credit_grant_payload,
+    CREDIT_GRANT_KIND, EQUIVOCATION_PENALTY_MILLI, EntryBody, Member, Payment, SignedEntry,
+    VALIDATOR_SET_KIND, credit_grant_payload, validator_set_payload,
 };
 use super::locking::VoteKind;
 use super::validators::ValidatorSet;
@@ -89,6 +89,9 @@ pub struct LedgerState {
     settled: BTreeSet<(NodeId, Hash32)>,
     /// Recorded equivocations: (validator, height, round, kind).
     equivocations: BTreeSet<(NodeId, u64, u32, VoteKind)>,
+    /// Governed validator sets by the height they take effect from.
+    validator_changes: BTreeMap<u64, ValidatorSet>,
+    enacted: BTreeSet<Hash32>,
     issued: u64,
 }
 
@@ -253,6 +256,18 @@ impl LedgerState {
                 receipts_root,
                 payments,
             } => self.apply_settle(author, job, receipts_root, payments)?,
+            EntryBody::ValidatorSetChange {
+                proposal,
+                members,
+                effective_height,
+            } => self.apply_validator_change(
+                author,
+                proposal,
+                members,
+                *effective_height,
+                block_timestamp_ms,
+                validators,
+            )?,
             EntryBody::Equivocation { first, .. } => {
                 // Signatures were checked against the chain id before apply
                 // (Ledger::admits); here only state rules remain.
@@ -362,6 +377,74 @@ impl LedgerState {
             self.credits.insert(worker, balance);
         }
         Ok(())
+    }
+
+    fn apply_validator_change(
+        &mut self,
+        author: NodeId,
+        proposal: &Hash32,
+        members: &[Member],
+        effective_height: u64,
+        block_timestamp_ms: u64,
+        validators: &ValidatorSet,
+    ) -> Result<()> {
+        if !validators.contains(&author) {
+            return Err(DarmError::Unauthorized(
+                "only validators enact set changes".into(),
+            ));
+        }
+        let Some(state) = self.proposals.get(proposal) else {
+            return Err(DarmError::Rejected("unknown proposal".into()));
+        };
+        if state.kind != VALIDATOR_SET_KIND
+            || state.payload != validator_set_payload(members, effective_height)
+        {
+            return Err(DarmError::Rejected(
+                "proposal does not authorise this validator set".into(),
+            ));
+        }
+        if state.outcome(validators, block_timestamp_ms) != ProposalOutcome::Passed {
+            return Err(DarmError::Rejected(
+                "validator-set proposal has not passed".into(),
+            ));
+        }
+        // Changes apply in height order; a later-enacted change cannot
+        // rewrite one already scheduled at or after its height.
+        if self
+            .validator_changes
+            .keys()
+            .next_back()
+            .is_some_and(|last| *last >= effective_height)
+        {
+            return Err(DarmError::Rejected(
+                "a change is already scheduled at or after that height".into(),
+            ));
+        }
+        if self.enacted.contains(proposal) {
+            return Err(DarmError::Duplicate);
+        }
+        let set = ValidatorSet::new(members.iter().map(|m| (m.node, m.weight)))?;
+        self.enacted.insert(*proposal);
+        self.validator_changes.insert(effective_height, set);
+        Ok(())
+    }
+
+    /// The validator set in force for the block at `height`: the latest
+    /// governed change effective at or before it, else the genesis set.
+    pub fn validator_set_at<'a>(
+        &'a self,
+        genesis: &'a ValidatorSet,
+        height: u64,
+    ) -> &'a ValidatorSet {
+        self.validator_changes
+            .range(..=height)
+            .next_back()
+            .map_or(genesis, |(_, set)| set)
+    }
+
+    /// Scheduled and past validator-set changes, by effective height.
+    pub fn validator_changes(&self) -> impl Iterator<Item = (&u64, &ValidatorSet)> {
+        self.validator_changes.iter()
     }
 
     /// Equivocations recorded against `validator`.

@@ -137,15 +137,18 @@ pub enum Feature {
     Credits,
     /// Equivocation evidence against validators (`Equivocation`).
     Evidence,
+    /// Validator-set changes by governance (`ValidatorSetChange`).
+    Governance,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 2] = [Feature::Credits, Feature::Evidence];
+    pub const ALL: [Feature; 3] = [Feature::Credits, Feature::Evidence, Feature::Governance];
 
     pub fn name(self) -> &'static str {
         match self {
             Feature::Credits => "credits",
             Feature::Evidence => "evidence",
+            Feature::Governance => "governance",
         }
     }
 
