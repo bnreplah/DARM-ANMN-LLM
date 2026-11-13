@@ -49,6 +49,9 @@ pub struct Sessions {
     responding: HashMap<String, PendingResp>,
     links: HashMap<String, AdaptiveController>,
     known_peers: BTreeSet<String>,
+    /// Peers that completed a hybrid session: open with a hybrid suite next
+    /// time instead of a classical one plus `Retry`. Forgotten on failure.
+    hybrid_peers: BTreeSet<String>,
     last_init_from: HashMap<String, u64>,
     last_attempt: HashMap<String, u64>,
     pub handshakes_completed: u64,
@@ -68,6 +71,7 @@ impl Sessions {
             responding: HashMap::new(),
             links: HashMap::new(),
             known_peers: BTreeSet::new(),
+            hybrid_peers: BTreeSet::new(),
             last_init_from: HashMap::new(),
             last_attempt: HashMap::new(),
             handshakes_completed: 0,
@@ -131,6 +135,16 @@ impl Sessions {
         self.links.entry(peer.to_string()).or_default()
     }
 
+    /// Whether `peer` completed a hybrid session (next handshake opens hybrid).
+    pub fn knows_hybrid(&self, peer: &str) -> bool {
+        self.hybrid_peers.contains(peer)
+    }
+
+    /// Drop the session with `peer` (it will be re-established on demand).
+    pub fn close(&mut self, peer: &str) {
+        self.sessions.remove(peer);
+    }
+
     /// Start a handshake with `peer` unless one exists or is in flight.
     pub fn initiate(
         &mut self,
@@ -149,7 +163,8 @@ impl Sessions {
         }
         self.note_peer(peer);
         self.last_attempt.insert(peer.to_string(), now_ms);
-        match Initiator::start(&self.config(identity, network)) {
+        let peer_hybrid = self.hybrid_peers.contains(peer);
+        match Initiator::start_for(&self.config(identity, network), peer_hybrid) {
             Ok((initiator, message)) => {
                 self.initiating.insert(
                     peer.to_string(),
@@ -279,10 +294,12 @@ impl Sessions {
                     return Ok(Vec::new());
                 }
                 let started = pending.started_ms;
-                let (session, fin) =
-                    pending
-                        .initiator
-                        .on_resp(&self.config(identity, network), &noise, now_ms)?;
+                let (session, fin) = pending
+                    .initiator
+                    .on_resp(&self.config(identity, network), &noise, now_ms)
+                    .inspect_err(|_| {
+                        self.hybrid_peers.remove(peer);
+                    })?;
                 self.link(peer)
                     .on_delivery(now_ms.saturating_sub(started) as f64);
                 self.install(peer, session);
@@ -315,6 +332,13 @@ impl Sessions {
         }
         tracing::debug!(peer, darm_node = %session.peer(), selected = ?session.selected(), "darm session established");
         self.handshakes_completed += 1;
+        if session.selected().suite.hybrid() {
+            if self.hybrid_peers.len() < MAX_SESSIONS {
+                self.hybrid_peers.insert(peer.to_string());
+            }
+        } else {
+            self.hybrid_peers.remove(peer);
+        }
         self.sessions.insert(peer.to_string(), session);
     }
 
@@ -419,6 +443,8 @@ impl Sessions {
             .collect();
         for peer in timed_out {
             self.initiating.remove(&peer);
+            // An older peer silently drops a hybrid opening; fall back.
+            self.hybrid_peers.remove(&peer);
             self.handshakes_failed += 1;
             self.link(&peer).on_timeout();
         }
@@ -475,6 +501,7 @@ impl Sessions {
             "known_peers": self.known_peers.len(),
             "handshakes_completed": self.handshakes_completed,
             "handshakes_failed": self.handshakes_failed,
+            "hybrid_peers": self.hybrid_peers.len(),
             "sessions": sessions,
         })
     }
