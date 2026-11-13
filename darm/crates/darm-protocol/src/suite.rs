@@ -125,7 +125,15 @@ impl Padding {
 }
 
 /// What one side supports, most preferred first.
+///
+/// Wire form (compatible with nodes that predate the hybrid suites):
+/// `suites` lists only the classical suites, which every version knows, and
+/// `suites_ext` the full preference list when it contains anything else.
+/// Older nodes ignore `suites_ext`; newer nodes read it when present. Names a
+/// node does not recognise, in any list, are skipped rather than rejected, so
+/// later suites, codecs or paddings do not break parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "OfferWire", into = "OfferWire")]
 pub struct Offer {
     pub suites: Vec<Suite>,
     pub codecs: Vec<Codec>,
@@ -142,13 +150,60 @@ impl Default for Offer {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct OfferWire {
+    suites: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suites_ext: Option<Vec<serde_json::Value>>,
+    codecs: Vec<serde_json::Value>,
+    paddings: Vec<serde_json::Value>,
+}
+
+/// Decode the entries this version knows; skip the rest.
+fn known<T: serde::de::DeserializeOwned>(values: Vec<serde_json::Value>) -> Vec<T> {
+    values
+        .into_iter()
+        .take(4 * MAX_OFFER_ITEMS)
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
+
+fn values<T: Serialize>(items: &[T]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|item| serde_json::to_value(item).expect("enum serializes"))
+        .collect()
+}
+
+impl From<OfferWire> for Offer {
+    fn from(wire: OfferWire) -> Self {
+        Self {
+            suites: known(wire.suites_ext.unwrap_or(wire.suites)),
+            codecs: known(wire.codecs),
+            paddings: known(wire.paddings),
+        }
+    }
+}
+
+impl From<Offer> for OfferWire {
+    fn from(offer: Offer) -> Self {
+        let base = offer.base_suites();
+        Self {
+            suites_ext: (base != offer.suites).then(|| values(&offer.suites)),
+            suites: values(&base),
+            codecs: values(&offer.codecs),
+            paddings: values(&offer.paddings),
+        }
+    }
+}
+
 /// How an offer treats the hybrid post-quantum suites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostQuantum {
-    /// Classical suites only. The default, because a peer running a version
-    /// that does not know the hybrid suites cannot parse an offer that
-    /// lists them.
+    /// Classical suites only. The default until the hybrid suites have had
+    /// wider review; `Preferred` is safe with older peers (they negotiate
+    /// classical).
     #[default]
     Off,
     /// Hybrid suites first, classical suites as a fallback.
@@ -198,6 +253,31 @@ impl Offer {
         self
     }
 
+    /// The classical suites, in order: what nodes that predate the hybrid
+    /// suites see, and what the handshake prologue commits to.
+    pub fn base_suites(&self) -> Vec<Suite> {
+        self.suites
+            .iter()
+            .copied()
+            .filter(|s| !s.hybrid())
+            .collect()
+    }
+
+    /// The suite a new handshake opens with. Without knowledge of the peer,
+    /// the first classical suite: every version can parse it, and a peer
+    /// that also prefers a hybrid suite answers with `Retry`. With
+    /// `peer_hybrid` (a hybrid session with this peer succeeded before), the
+    /// first suite outright.
+    pub fn opening_suite(&self, peer_hybrid: bool) -> Suite {
+        if peer_hybrid {
+            return self.suites[0];
+        }
+        self.base_suites()
+            .first()
+            .copied()
+            .unwrap_or(self.suites[0])
+    }
+
     pub fn validate(&self) -> Result<()> {
         check_list("offer suites", &self.suites)?;
         check_list("offer codecs", &self.codecs)?;
@@ -205,10 +285,14 @@ impl Offer {
     }
 
     /// Canonical bytes, mixed into the Noise prologue so the handshake fails
-    /// if anyone altered either offer in transit.
+    /// if anyone altered the offer in transit. Only the classical suites are
+    /// committed, so a node that predates `suites_ext` computes the same
+    /// prologue. Tampering with `suites_ext` is caught by the initiator,
+    /// which re-runs negotiation against the responder's authenticated offer.
     pub fn encode(&self, encoder: &mut Canonical) {
-        encoder.u32(self.suites.len() as u32);
-        for suite in &self.suites {
+        let base = self.base_suites();
+        encoder.u32(base.len() as u32);
+        for suite in &base {
             encoder.u8(suite.code());
         }
         encoder.u32(self.codecs.len() as u32);
@@ -305,6 +389,62 @@ mod tests {
             ..Offer::default()
         };
         assert!(negotiate(&a, &empty).is_err());
+    }
+
+    #[test]
+    fn wire_form_hides_hybrid_suites_from_older_parsers() {
+        let offer = Offer::with_post_quantum(PostQuantum::Preferred);
+        let json = serde_json::to_value(&offer).unwrap();
+        // `suites` carries only what every version knows.
+        let base: Vec<Suite> = serde_json::from_value(json["suites"].clone()).unwrap();
+        assert!(base.iter().all(|s| !s.hybrid()));
+        assert_eq!(
+            json["suites_ext"].as_array().unwrap().len(),
+            offer.suites.len()
+        );
+        let back: Offer = serde_json::from_value(json).unwrap();
+        assert_eq!(back, offer);
+        // A classical offer has no extension list at all.
+        let plain = serde_json::to_value(Offer::default()).unwrap();
+        assert!(plain.get("suites_ext").is_none());
+    }
+
+    #[test]
+    fn unknown_options_are_skipped_not_fatal() {
+        let json = serde_json::json!({
+            "suites": ["noise_xx_cha_cha_poly"],
+            "suites_ext": ["future_lattice_suite", "hybrid_ml_kem768_aes_gcm", "noise_xx_cha_cha_poly"],
+            "codecs": ["json", "msgpack_v9"],
+            "paddings": [7, "minimal"],
+        });
+        let offer: Offer = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            offer.suites,
+            vec![Suite::HybridMlKem768AesGcm, Suite::NoiseXxChaChaPoly]
+        );
+        assert_eq!(offer.codecs, vec![Codec::Json]);
+        assert_eq!(offer.paddings, vec![Padding::Minimal]);
+        // Nothing known at all still parses, then fails validation.
+        let none: Offer = serde_json::from_value(serde_json::json!({
+            "suites": ["x"], "codecs": ["y"], "paddings": ["z"],
+        }))
+        .unwrap();
+        assert!(none.validate().is_err());
+    }
+
+    #[test]
+    fn opening_suite_is_classical_unless_the_peer_is_known() {
+        let preferred = Offer::with_post_quantum(PostQuantum::Preferred);
+        assert!(!preferred.opening_suite(false).hybrid());
+        assert!(preferred.opening_suite(true).hybrid());
+        let required = Offer::with_post_quantum(PostQuantum::Required);
+        assert!(required.opening_suite(false).hybrid());
+        // The prologue commits to the same suites an older node parses.
+        let mut a = Canonical::new("t");
+        preferred.encode(&mut a);
+        let mut b = Canonical::new("t");
+        Offer::default().encode(&mut b);
+        assert_eq!(a.as_bytes(), b.as_bytes());
     }
 
     #[test]

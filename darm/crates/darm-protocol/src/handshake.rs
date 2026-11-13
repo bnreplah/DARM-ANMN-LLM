@@ -255,12 +255,23 @@ pub struct Initiator {
 }
 
 impl Initiator {
-    /// Start a handshake with the initiator's most preferred suite.
+    /// Start a handshake with a suite every version can parse
+    /// ([`Offer::opening_suite`]); a peer that prefers a hybrid suite
+    /// answers with `Retry`.
     pub fn start(config: &HandshakeConfig<'_>) -> Result<(Self, HandshakeMsg)> {
+        Self::start_for(config, false)
+    }
+
+    /// Like [`Initiator::start`], opening with the most preferred suite when
+    /// the peer is known to support hybrid suites (saves the `Retry`).
+    pub fn start_for(
+        config: &HandshakeConfig<'_>,
+        peer_hybrid: bool,
+    ) -> Result<(Self, HandshakeMsg)> {
         config.offer.validate()?;
         let mut sid = [0u8; 16];
         getrandom::fill(&mut sid).map_err(|e| DarmError::Entropy(e.to_string()))?;
-        Self::begin(config, sid, config.offer.suites[0], false)
+        Self::begin(config, sid, config.offer.opening_suite(peer_hybrid), false)
     }
 
     fn begin(

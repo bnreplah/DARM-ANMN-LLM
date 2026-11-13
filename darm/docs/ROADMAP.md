@@ -41,10 +41,11 @@ Ordered by security value first.
     Kotlin SDKs on power, network and thermal notifications.
 12. **Post-quantum sessions (hybrid key exchange done, opt-in).**
     `DARM_SESSION_PQ` adds X25519 + ML-KEM-768 suites, mixing the ML-KEM
-    secret into Noise as a pre-shared key. Remaining: an offer encoding
-    that older nodes can skip over, so the suites can be on by default;
-    post-quantum signatures (ML-DSA) for identities, memories and votes;
-    and specifying the suites in DARM-ANN `spec/PROTOCOL.md` section 9.
+    secret into Noise as a pre-shared key; `preferred` interoperates with
+    older nodes (tested against the pre-hybrid release). Remaining:
+    switching the default to `preferred` after review of the ML-KEM
+    dependency, and post-quantum signatures (ML-DSA) for identities,
+    memories and votes.
 13. **Fabric carriers with independent streams.** Priority in `darm-fabric`
     acts at the sender's queue; on an ordered carrier (TCP) bytes already
     sent cannot be overtaken. A QUIC carrier with one stream per sync class

@@ -1013,6 +1013,30 @@ fn hybrid_post_quantum_sessions_carry_gossip_and_mix_with_classical_peers() {
     // With the classical peer both upgraded nodes fall back, and still talk.
     assert!(suite(&nodes[0], "peer2").starts_with("noise_xx"));
     assert!(suite(&nodes[2], "peer1").starts_with("noise_xx"));
+    // The upgraded peer is remembered: a fresh handshake opens with the
+    // hybrid suite directly (no Retry round trip); the classical one is not.
+    assert!(nodes[0].sessions.knows_hybrid("peer1"));
+    assert!(!nodes[0].sessions.knows_hybrid("peer2"));
+    nodes[0].sessions.close("peer1");
+    let identity = NodeIdentity::from_secret_bytes(&[1; 32]);
+    let network = nodes[0].network();
+    // After the responder's anti-flood cooldown for this peer.
+    let later = NOW + crate::sessions::INIT_COOLDOWN_MS + 1;
+    let opening = nodes[0]
+        .sessions
+        .initiate("peer1", &identity, network, later);
+    match &opening[0].message {
+        Wire::Handshake {
+            handshake: darm_protocol::HandshakeMsg::Init { suite, .. },
+        } => assert!(suite.hybrid()),
+        other => panic!("expected Init, got {other:?}"),
+    }
+    pump(
+        &mut nodes,
+        opening.into_iter().map(|o| (0, o)).collect(),
+        later,
+    );
+    assert!(suite(&nodes[0], "peer1").starts_with("hybrid_ml_kem768"));
 
     let (id, out) = nodes[0]
         .remember_exchange("where are the runbooks?", "in ops/", "m", "default", NOW)

@@ -1,0 +1,19 @@
+# Wire-compatibility tests against an earlier release. A separate workspace,
+# because the earlier crates share names with the current ones.
+#   cargo test --manifest-path darm/compat-tests/Cargo.toml
+[package]
+name = "darm-compat-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+darm-core = { path = "../crates/darm-core" }
+darm-protocol = { path = "../crates/darm-protocol" }
+# Last release before the hybrid post-quantum suites.
+legacy-core = { package = "darm-core", git = "https://github.com/bnreplah/DARM-ANMN-LLM", rev = "3769ea69dabfbde31e0903068d5aa1908b883657" }
+legacy-protocol = { package = "darm-protocol", git = "https://github.com/bnreplah/DARM-ANMN-LLM", rev = "3769ea69dabfbde31e0903068d5aa1908b883657" }
+serde = "1"
+serde_json = "1"
