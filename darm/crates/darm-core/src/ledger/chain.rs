@@ -3,7 +3,7 @@ use super::entry::{
 };
 use super::locking::{HeightVote, VoteKind, vote_message};
 use super::state::LedgerState;
-use super::validators::ChainConfig;
+use super::validators::{ChainConfig, ValidatorSet};
 use crate::{DarmError, Hash32, NodeId, NodeIdentity, Result, merkle};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -120,14 +120,20 @@ impl Ledger {
         self.pending.len()
     }
 
+    /// The validator set in force for the next block. Starts as the
+    /// genesis set in the config; governed changes replace it from their
+    /// effective height on.
+    pub fn validators(&self) -> &ValidatorSet {
+        self.state
+            .validator_set_at(&self.config.validators, self.height() + 1)
+    }
+
     pub fn is_validator(&self, node: &NodeId) -> bool {
-        self.config.validators.contains(node)
+        self.validators().contains(node)
     }
 
     pub fn proposer_for_next(&self, round: u32) -> NodeId {
-        self.config
-            .validators
-            .proposer_for(self.height() + 1, round)
+        self.validators().proposer_for(self.height() + 1, round)
     }
 
     pub fn contains_entry(&self, id: &Hash32) -> bool {
@@ -156,6 +162,14 @@ impl Ledger {
             _ => match &entry.entry.body {
                 super::EntryBody::Equivocation { first, second } => {
                     super::entry::verify_equivocation(&self.chain_id, first, second)
+                }
+                super::EntryBody::ValidatorSetChange {
+                    effective_height, ..
+                } if *effective_height < height + super::VALIDATOR_CHANGE_DELAY => {
+                    Err(DarmError::Rejected(format!(
+                        "effective height must be at least {}",
+                        height + super::VALIDATOR_CHANGE_DELAY
+                    )))
                 }
                 _ => Ok(()),
             },
@@ -207,6 +221,7 @@ impl Ledger {
             ));
         }
         let timestamp_ms = now_ms.max(self.blocks.last().map_or(0, |b| b.header.timestamp_ms));
+        let validators = self.validators().clone();
         let mut scratch = self.state.clone();
         let mut chosen = Vec::new();
         let mut rejected = Vec::new();
@@ -215,9 +230,7 @@ impl Ledger {
                 break;
             }
             let admitted = self.admits(entry, self.height() + 1);
-            match admitted
-                .and_then(|()| scratch.apply(entry, timestamp_ms, &self.config.validators))
-            {
+            match admitted.and_then(|()| scratch.apply(entry, timestamp_ms, &validators)) {
                 Ok(()) => chosen.push(entry.clone()),
                 Err(_) => rejected.push(*key),
             }
@@ -238,7 +251,7 @@ impl Ledger {
             entry_count: ids.len() as u32,
             timestamp_ms,
             proposer,
-            validators: self.config.validators.commitment(),
+            validators: self.validators().commitment(),
         };
         let hash = header.hash();
         let block = Block {
@@ -328,6 +341,7 @@ impl Ledger {
             ));
         }
         let chain_id = self.chain_id;
+        let validators = self.validators().clone();
         let Some(candidate) = self.candidates.get_mut(block_hash) else {
             return Err(DarmError::Rejected("unknown candidate".into()));
         };
@@ -343,10 +357,7 @@ impl Ledger {
             return Ok(None);
         }
         candidate.attestations.push(attestation);
-        let quorum = self
-            .config
-            .validators
-            .has_quorum(candidate.attestations.iter().map(|a| &a.validator));
+        let quorum = validators.has_quorum(candidate.attestations.iter().map(|a| &a.validator));
         if !quorum {
             return Ok(None);
         }
@@ -430,19 +441,14 @@ impl Ledger {
         if header.prev != self.head_hash() {
             return Err(DarmError::Rejected("block does not extend the head".into()));
         }
-        if header.validators != self.config.validators.commitment() {
+        if header.validators != self.validators().commitment() {
             return Err(DarmError::Rejected("validator set mismatch".into()));
         }
         let previous_ts = self.blocks.last().map_or(0, |b| b.header.timestamp_ms);
         if header.timestamp_ms < previous_ts {
             return Err(DarmError::Rejected("block timestamp went backwards".into()));
         }
-        if self
-            .config
-            .validators
-            .proposer_for(header.height, header.round)
-            != header.proposer
-        {
+        if self.validators().proposer_for(header.height, header.round) != header.proposer {
             return Err(DarmError::Unauthorized("wrong proposer for round".into()));
         }
         header.proposer.verify(
@@ -474,7 +480,7 @@ impl Ledger {
                 return Err(DarmError::Rejected("entry is newer than its block".into()));
             }
             self.admits(entry, header.height)?;
-            state.apply(entry, header.timestamp_ms, &self.config.validators)?;
+            state.apply(entry, header.timestamp_ms, self.validators())?;
         }
         Ok(state)
     }
@@ -503,7 +509,7 @@ impl Ledger {
                 )
             }
         };
-        if block.attestations.len() > self.config.validators.len() {
+        if block.attestations.len() > self.validators().len() {
             return Err(DarmError::LimitExceeded("commit certificate".into()));
         }
         let mut signers = HashSet::new();
@@ -518,7 +524,7 @@ impl Ledger {
                 .verify(&message, &attestation.signature)?;
             signers.insert(attestation.validator);
         }
-        if !self.config.validators.has_quorum(signers.iter()) {
+        if !self.validators().has_quorum(signers.iter()) {
             return Err(DarmError::Rejected("block lacks attestation quorum".into()));
         }
         Ok(())
@@ -544,5 +550,7 @@ pub use rounds::RoundProposal;
 mod credit_tests;
 #[cfg(test)]
 mod evidence_tests;
+#[cfg(test)]
+mod governance_tests;
 #[cfg(test)]
 mod tests;

@@ -61,6 +61,35 @@ pub fn verify_equivocation(chain: &Hash32, first: &Vote, second: &Vote) -> Resul
     Ok(())
 }
 
+/// Proposal `kind` that authorises a validator-set change.
+pub const VALIDATOR_SET_KIND: &str = "validator-set";
+/// A change takes effect at least this many blocks after the block that
+/// enacts it, so every replica knows the set before that height starts.
+pub const VALIDATOR_CHANGE_DELAY: u64 = 2;
+/// Largest validator set a change may install.
+pub const MAX_VALIDATORS: usize = 128;
+
+/// One member of a proposed validator set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub node: NodeId,
+    pub weight: u64,
+}
+
+fn encode_members(encoder: &mut Canonical, members: &[Member], effective_height: u64) {
+    encoder.u64(effective_height).u32(members.len() as u32);
+    for member in members {
+        encoder.fixed32(member.node.as_bytes()).u64(member.weight);
+    }
+}
+
+/// Hash a `validator-set` proposal must carry as its payload.
+pub fn validator_set_payload(members: &[Member], effective_height: u64) -> Hash32 {
+    let mut encoder = Canonical::new("validator-set");
+    encode_members(&mut encoder, members, effective_height);
+    Hash32::digest("validator-set", encoder.as_bytes())
+}
+
 /// Proposal `kind` that authorises credit grants.
 pub const CREDIT_GRANT_KIND: &str = "credit-grant";
 
@@ -133,6 +162,15 @@ pub enum EntryBody {
     /// is the vote whose block sorts lower (nil first), so each offence has
     /// exactly one valid encoding.
     Equivocation { first: Vote, second: Vote },
+    /// Install a new validator set from `effective_height` on. Author must be
+    /// a current validator; `proposal` must be a passed `validator-set`
+    /// proposal whose payload is `validator_set_payload(members,
+    /// effective_height)`. Members are sorted by node id.
+    ValidatorSetChange {
+        proposal: Hash32,
+        members: Vec<Member>,
+        effective_height: u64,
+    },
 }
 
 impl EntryBody {
@@ -141,6 +179,7 @@ impl EntryBody {
         match self {
             Self::CreditGrant { .. } | Self::ComputeSettle { .. } => Some(super::Feature::Credits),
             Self::Equivocation { .. } => Some(super::Feature::Evidence),
+            Self::ValidatorSetChange { .. } => Some(super::Feature::Governance),
             _ => None,
         }
     }
@@ -244,6 +283,14 @@ impl EntryBody {
                 encode_vote(encoder, first);
                 encode_vote(encoder, second);
             }
+            Self::ValidatorSetChange {
+                proposal,
+                members,
+                effective_height,
+            } => {
+                encoder.u8(11).fixed32(proposal.as_bytes());
+                encode_members(encoder, members, *effective_height);
+            }
         }
     }
 
@@ -329,6 +376,19 @@ impl EntryBody {
                         "votes must differ and be in canonical order",
                     ));
                 }
+                Ok(())
+            }
+            Self::ValidatorSetChange { members, .. } => {
+                if members.len() > MAX_VALIDATORS {
+                    return Err(DarmError::LimitExceeded("validator set".into()));
+                }
+                if members.windows(2).any(|w| w[0].node >= w[1].node) {
+                    return Err(DarmError::malformed(
+                        "entry",
+                        "members must be sorted by node id without duplicates",
+                    ));
+                }
+                super::ValidatorSet::new(members.iter().map(|m| (m.node, m.weight)))?;
                 Ok(())
             }
         }

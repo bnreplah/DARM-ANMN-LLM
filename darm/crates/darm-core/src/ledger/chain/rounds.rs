@@ -41,7 +41,7 @@ impl Ledger {
         self.rounds = Some(HeightVote::new(
             self.chain_id,
             self.height() + 1,
-            self.config.validators.clone(),
+            self.validators().clone(),
         ));
     }
 

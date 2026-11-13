@@ -290,7 +290,7 @@ impl DarmNode {
 
     /// Ledger gossip is on when the chain has more than one validator.
     pub fn ledger_gossip(&self) -> bool {
-        self.ledger.config().validators.len() > 1 && self.mesh_allows_gossip()
+        self.ledger.validators().len() > 1 && self.mesh_allows_gossip()
     }
 
     /// How much a memory author is trusted for prompt injection.
@@ -318,7 +318,7 @@ impl DarmNode {
             return explicit;
         }
         let reputation = self.ledger.state().reputation(node) as f64 / 2_000.0;
-        let phase_ceiling: f64 = match self.ledger.config().validators.security_phase() {
+        let phase_ceiling: f64 = match self.ledger.validators().security_phase() {
             darm_core::ledger::SecurityPhase::FederatedGenesis => 0.1,
             darm_core::ledger::SecurityPhase::GraduatedOnboarding => 0.3,
             darm_core::ledger::SecurityPhase::PermissionlessBft => 0.5,
@@ -344,7 +344,7 @@ impl DarmNode {
             .config
             .trusted_authors
             .iter()
-            .chain(self.ledger.config().validators.members().map(|(n, _)| n))
+            .chain(self.ledger.validators().members().map(|(n, _)| n))
             .map(|n| (*n, self.trust(n)))
             .chain(std::iter::once((self.node_id(), 1.0)))
             .collect();
@@ -960,7 +960,7 @@ impl DarmNode {
 
     pub fn status(&self, now_ms: u64) -> Value {
         let ledger = &self.ledger;
-        let validators = ledger.config().validators.clone();
+        let validators = ledger.validators().clone();
         let proposals: Vec<Value> = ledger
             .state()
             .proposals()
@@ -1004,6 +1004,12 @@ impl DarmNode {
                 "pending": ledger.pending_len(),
                 "round": self.round,
                 "validators": validators.members().map(|(n, w)| json!({"node": n, "weight": w})).collect::<Vec<_>>(),
+                "validator_changes": ledger.state().validator_changes()
+                    .map(|(height, set)| json!({
+                        "effective_height": height,
+                        "members": set.members().map(|(n, w)| json!({"node": n, "weight": w})).collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>(),
                 "is_validator": ledger.is_validator(&self.node_id()),
                 "security_phase": validators.security_phase(),
                 "max_faulty_validators": validators.max_faulty(),
