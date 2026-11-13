@@ -1020,7 +1020,11 @@ fn hybrid_post_quantum_sessions_carry_gossip_and_mix_with_classical_peers() {
     nodes[0].sessions.close("peer1");
     let identity = NodeIdentity::from_secret_bytes(&[1; 32]);
     let network = nodes[0].network();
-    let opening = nodes[0].sessions.initiate("peer1", &identity, network, NOW);
+    // After the responder's anti-flood cooldown for this peer.
+    let later = NOW + crate::sessions::INIT_COOLDOWN_MS + 1;
+    let opening = nodes[0]
+        .sessions
+        .initiate("peer1", &identity, network, later);
     match &opening[0].message {
         Wire::Handshake {
             handshake: darm_protocol::HandshakeMsg::Init { suite, .. },
@@ -1030,7 +1034,7 @@ fn hybrid_post_quantum_sessions_carry_gossip_and_mix_with_classical_peers() {
     pump(
         &mut nodes,
         opening.into_iter().map(|o| (0, o)).collect(),
-        NOW,
+        later,
     );
     assert!(suite(&nodes[0], "peer1").starts_with("hybrid_ml_kem768"));
 
