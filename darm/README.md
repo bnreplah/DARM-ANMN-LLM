@@ -416,10 +416,23 @@ What it does not do:
   position.
 - **Signatures elsewhere are unchanged.** Memories, ledger entries and
   votes are Ed25519.
-- **Every peer must run a version that knows the hybrid suites** before any
-  node enables this, even peers that leave it `off`: an older node cannot
-  parse an offer that lists a suite it has never heard of, and the handshake
-  fails. That is why the default is `off`.
+- **`preferred` is safe with older peers.** Offers carry the classical
+  suites in `suites`, which every version parses, and the full list in
+  `suites_ext`, which older nodes ignore. A node opens with a classical
+  suite; a peer that also prefers a hybrid suite answers `Retry`, and the
+  session upgrades. An older peer just completes a classical session. After
+  one hybrid session with a peer, the node opens with the hybrid suite
+  directly (no extra round trip), and forgets that if a handshake fails.
+  This is tested against the actual pre-hybrid release
+  (`darm/compat-tests`, run in CI). Unknown suite, codec or padding names
+  are skipped, so later additions will not break parsing either.
+- **`required` refuses older peers** by design: it never offers a classical
+  suite.
+- **One incompatibility:** nodes built between the first hybrid release and
+  this change, running `preferred` or `required`, cannot handshake as
+  initiators with newer nodes (they commit the hybrid suites in the
+  prologue). The default was `off`, so this only affects nodes that opted in.
+- The default stays `off` until the ML-KEM dependency has had wider review.
 - The handshake is larger: message 1 goes from 44 to 1,644 base64
   characters and message 2 from 628 to 2,596, still inside the 8 KiB
   handshake limit.
@@ -444,7 +457,7 @@ What it does not do:
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
 | `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`, `governance`. Must be identical on every validator. See "Closed-loop compute credits". |
-| `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. Enable only once every peer runs a version that knows them. See "Hybrid post-quantum sessions". |
+| `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. `preferred` is safe with older peers (they negotiate classical). See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |
 | `DARM_GPUS` | none | Comma-separated `backend:memory_mb:gflops[:label]`, e.g. `cuda:24576:82000:rtx4090`. |
