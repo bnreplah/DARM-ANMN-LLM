@@ -23,6 +23,7 @@
 
 pub mod archive;
 pub mod audit_ops;
+pub mod auto_outcome;
 pub mod chat;
 pub mod compute;
 pub mod compute_ops;

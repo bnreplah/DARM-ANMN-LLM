@@ -116,10 +116,33 @@ demoted, finalized, forgotten) as ids and event kinds with a sequence number
 to resume from. It never includes memory content, and it is an in-memory
 view of the last 512 events, not an audit log.
 
+**Automatic reports from conversations.** Through the `darm` virtual model
+the node also reports outcomes itself, in two steps:
+
+1. After a turn, a recalled memory counts as *used* if the answer contains
+   at least 3, and at least 30%, of the memory's distinctive words (words of
+   four or more characters that the question did not already contain).
+   Unused memories are not scored.
+2. The used memories wait up to 30 minutes for the next turn of that
+   conversation, recognised by the node's previous answer appearing in the
+   request history. If the user's next message is a correction ("that's
+   wrong", "not what I asked", ...) or repeats the question, each used
+   memory gets `helped: false`; any other follow-up gives `helped: true`.
+   No follow-up: no report.
+
+`darm_status.auto_outcome` shows whether this is on, how many turns are
+waiting, and how many reports it has made. Limits: "used" is word overlap,
+not proof the memory was right, so a wrong memory the user accepts is scored
+as helpful; the correction phrases are English; and anyone who can chat
+through the node can steer the scores of memories recalled for their own
+turns. For that last reason it is off on a public mesh unless
+`DARM_AUTO_OUTCOME=1`, and on otherwise (`DARM_AUTO_OUTCOME=0` disables it).
+Automatic reports obey the same one-report-per-recall bound and stay local.
+
 What this is: a feedback loop in which results change what the node
-retrieves next. What it is not: the node does not judge outcomes itself (the
-caller reports them), it does not retrain any model, and the feed is a record
-of memory activity, not awareness.
+retrieves next. What it is not: a judgment of truth (the automatic signal
+is usage plus the user's reaction), retraining of any model, or awareness:
+the feed is a record of memory activity.
 
 ## Compute pool: CPUs and GPUs, servers and phones
 
@@ -464,6 +487,7 @@ What it does not do:
 | `DARM_VALIDATORS` | this node | Comma-separated DARM node ids (hex Ed25519 keys). More than one enables ledger gossip. |
 | `DARM_TRUSTED_AUTHORS` | none | Node ids whose shared memories may be injected into prompts (validators are trusted too). |
 | `DARM_REMEMBER` | `1` | Remember chat exchanges (locally unless sharing is on). |
+| `DARM_AUTO_OUTCOME` | on, off on a public mesh | Infer memory outcome reports from conversations. See "Automatic reports from conversations". |
 | `DARM_SHARE` | `0` | New memories are mesh-scoped, committed to the ledger, and gossiped. |
 | `DARM_ALLOW_PUBLIC_GOSSIP` | `0` | Permit memory/ledger gossip on a public mesh. |
 | `DARM_PROPOSE_REPLICATION` | `0` | Submit `replicate` ledger proposals when the swarm policy recommends it. |
