@@ -448,10 +448,11 @@ ML-KEM-768 (FIPS 203) exchange to the same handshake:
 
 What it does not do:
 
-- **Authentication is still classical** (Ed25519 identities, X25519 static
-  keys). A quantum attacker present *during* a handshake could impersonate
-  a node. Recorded traffic stays confidential. Hybrid TLS 1.3 is in the same
-  position.
+- **Authentication is classical unless keys are bound.** By default a
+  session is authenticated with Ed25519 identities and X25519 static keys:
+  recorded traffic is safe from later quantum decryption, but a live quantum
+  attacker could impersonate a node. "Post-quantum identities" below closes
+  that for nodes that have bound an ML-DSA key on the ledger.
 - **Signatures elsewhere are unchanged.** Memories, ledger entries and
   votes are Ed25519.
 - **`preferred` is safe with older peers.** Offers carry the classical
@@ -495,7 +496,7 @@ What it does not do:
 | `DARM_CAPACITY` / `DARM_TARGET_LATENCY_MS` | 8 / 8000 | Lifecycle energy and health calibration. |
 | `DARM_CONSENSUS` | `one-vote` | `one-vote` or `locking` (lock-based BFT rounds; an equivocating proposer costs a round instead of stalling the height). Must be identical on every validator of a chain. Validators need `DARM_DATA_DIR` so votes are durable. See "Consensus" above. |
 | `DARM_SESSIONS` | `preferred` | `off`, `preferred` (seal to peers with sessions, plaintext signed gossip to others) or `required` (only handshakes in the clear; plaintext gossip refused). Forced to `required` on a public mesh unless explicitly `off`. |
-| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`, `governance`. Must be identical on every validator. See "Closed-loop compute credits". |
+| `DARM_ACTIVATE` | none | Feature activation heights, comma separated, e.g. `credits@1200,evidence@1200`. Features: `credits`, `evidence`, `governance`, `pq-identity`. Must be identical on every validator. See "Closed-loop compute credits". |
 | `DARM_SESSION_PQ` | `off` | `off`, `preferred` or `required`: offer hybrid X25519 + ML-KEM-768 session suites. `preferred` is safe with older peers (they negotiate classical). See "Hybrid post-quantum sessions". |
 | `DARM_COMPUTE_POOL` | `1` | Advertise this node's devices and accept peers' adverts. |
 | `DARM_FORM_FACTOR` | `server` | `server`, `desktop`, `laptop`, `phone`, `tablet`, `edge`; sets contribution defaults. |
@@ -637,6 +638,53 @@ submission, never proposed, and a block containing one is rejected. Compare
 height arrives; nodes with different schedules fork at the first height where
 they differ. The schedule is not part of the genesis hash, so a running chain
 can add one.
+
+## Post-quantum identities (ML-DSA)
+
+A node id is an Ed25519 public key, which a large quantum computer could
+forge signatures for. With `DARM_ACTIVATE=pq-identity@<height>` each node
+also has an ML-DSA-65 key (FIPS 204) tied to its node id on the ledger:
+
+1. **Derivation.** The ML-DSA key is derived from the identity's secret
+   seed. There is no second key file. Breaking Ed25519 yields the private
+   scalar, not the seed it was hashed from, so it does not yield the ML-DSA
+   key.
+2. **Binding.** Once the feature is active, every validator and registered
+   node submits one `PqKeyBind` entry (tag 12): its 1952-byte public key and
+   that key's signature over `(chain id, node id)`. The ledger checks the
+   proof and records one key per node, permanently.
+   `darm_status.ledger.post_quantum_keys` shows how many are bound and
+   whether yours is.
+3. **Enforcement in sessions.** A node whose chain schedules the feature
+   adds an ML-DSA signature to every session binding, over the same message
+   as its Ed25519 signature. When a peer's key is bound on the verifier's
+   ledger, the verifier requires that signature: leaving it out or getting
+   it wrong fails the handshake, so forging Ed25519 alone no longer
+   impersonates that node. Each session's status shows `post_quantum_auth`.
+   Combined with `DARM_SESSION_PQ=required`, neither the key exchange nor
+   the authentication of such a session rests on classical cryptography
+   alone.
+
+Limits:
+
+- **Only session authentication is hybrid.** Ledger entries, block
+  attestations, round votes, memories and compute receipts are still signed
+  with Ed25519 alone. Making finality hybrid is the next step and changes
+  the block format.
+- **Bind before the threat exists.** The binding entry itself is authorized
+  by an Ed25519 signature. An attacker who can already forge Ed25519 could
+  bind their own ML-DSA key to a node that has not bound one yet.
+- A verifier enforces only what its own ledger shows. A node that has not
+  yet synced a peer's binding accepts that peer with Ed25519 alone.
+- Sessions established before a binding stay up until they expire (one hour
+  by default) and show `post_quantum_auth: false` until then.
+- Handshake messages grow by about 4.4 KB per side. Nodes that schedule
+  `pq-identity` cannot hold sessions with releases older than this one,
+  whose handshake buffers are too small; such releases cannot follow a
+  chain that contains `PqKeyBind` entries anyway.
+- Keys cannot be rotated without a new identity. Signing uses FIPS 204's
+  deterministic variant. The `ml-dsa` crate has not been independently
+  audited.
 
 ## A2A Agent Cards
 

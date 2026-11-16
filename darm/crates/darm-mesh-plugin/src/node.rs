@@ -105,6 +105,7 @@ pub struct DarmNode {
     pub compute: ComputeState,
     pub sessions: Sessions,
     registration_submitted: bool,
+    pq_bind_submitted: bool,
     last_replication_ms: u64,
     replication: Vec<(Hash32, ReplicationRecommendation)>,
     archived: std::collections::HashSet<Hash32>,
@@ -154,7 +155,17 @@ impl DarmNode {
         now_ms: u64,
     ) -> Result<Self> {
         let compute = ComputeState::new(&config, network_id(&config, &ledger), identity.node_id());
-        let sessions = Sessions::new(config.sessions, config.post_quantum, compute.hints())?;
+        let mut sessions = Sessions::new(config.sessions, config.post_quantum, compute.hints())?;
+        // Sign session bindings with ML-DSA whenever the chain schedules the
+        // feature, at any height: a node that waited to see its own binding
+        // finalized could not sync from peers that already require the proof.
+        if config
+            .activations
+            .contains_key(&darm_core::ledger::Feature::PqIdentity)
+        {
+            sessions.set_pq_identity(identity.pq_identity());
+        }
+        sessions.set_pq_keys(ledger.state().pq_keys().clone());
         let role = if ledger.is_validator(&identity.node_id()) {
             Role::Guard
         } else {
@@ -190,6 +201,7 @@ impl DarmNode {
             compute,
             sessions,
             registration_submitted: false,
+            pq_bind_submitted: false,
             last_replication_ms: 0,
             replication: Vec::new(),
             archived: std::collections::HashSet::new(),
@@ -540,6 +552,7 @@ impl DarmNode {
             self.proposed_at = None;
             self.last_progress_ms = block.header.timestamp_ms;
         }
+        self.refresh_pq();
         Ok(())
     }
 
@@ -629,8 +642,9 @@ impl DarmNode {
         self.lifecycle.tick(&signals, now_ms);
 
         let mut out = Vec::new();
-        let steps: [TickStep; 3] = [
+        let steps: [TickStep; 4] = [
             Self::ensure_registered,
+            Self::ensure_pq_bound,
             Self::try_propose,
             Self::consider_replication,
         ];
@@ -1040,6 +1054,10 @@ impl DarmNode {
                 "max_faulty_validators": validators.max_faulty(),
                 "committed_memories": ledger.state().committed_memories(),
                 "registered_nodes": ledger.state().registrations().count(),
+                "post_quantum_keys": {
+                    "bound": ledger.state().pq_keys().len(),
+                    "mine_bound": ledger.state().pq_key(&self.node_id()).is_some(),
+                },
                 "activations": ledger.config().activations.iter()
                     .map(|(f, h)| (f.name().to_string(), json!({"height": h, "active": ledger.config().active(*f, ledger.height() + 1)})))
                     .collect::<serde_json::Map<_, _>>(),
@@ -1144,6 +1162,7 @@ fn restrict_dir(_dir: &std::path::Path) -> Result<()> {
 
 mod learning;
 mod one_vote;
+mod pq;
 mod rounds;
 
 #[cfg(test)]

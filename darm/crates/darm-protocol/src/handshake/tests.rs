@@ -8,6 +8,10 @@ struct Side {
     identity: NodeIdentity,
     key: StaticKey,
     offer: Offer,
+    /// This side's ML-DSA key, when it signs with it.
+    pq: Option<PqIdentity>,
+    /// What this side's ledger says about bound ML-DSA keys.
+    directory: BTreeMap<NodeId, PqPublicKey>,
 }
 
 impl Side {
@@ -16,6 +20,8 @@ impl Side {
             identity: NodeIdentity::from_secret_bytes(&[seed; 32]),
             key: StaticKey::generate().unwrap(),
             offer,
+            pq: None,
+            directory: BTreeMap::new(),
         }
     }
 
@@ -26,6 +32,8 @@ impl Side {
             network: Hash32::digest("net", b"test"),
             offer: self.offer.clone(),
             limits: SessionLimits::default(),
+            pq: self.pq.as_ref(),
+            pq_keys: Some(&self.directory),
         }
     }
 }
@@ -438,4 +446,106 @@ fn session_keys_depend_on_the_ml_kem_secret() {
         unreachable!()
     };
     assert!(pending.on_fin(&b.config(), &noise, NOW).is_err());
+}
+
+/// A side whose ML-DSA key is on the ledger and which signs with it.
+fn bound(seed: u8) -> Side {
+    let mut side = Side::new(seed, Offer::default());
+    side.pq = Some(side.identity.pq_identity());
+    side
+}
+
+fn learn(side: &mut Side, about: &Side) {
+    side.directory.insert(
+        about.identity.node_id(),
+        about.identity.pq_identity().public().clone(),
+    );
+}
+
+#[test]
+fn ledger_bound_peers_authenticate_with_ml_dsa_as_well() {
+    let (mut a, mut b) = (bound(1), bound(2));
+    learn(&mut a, &b);
+    learn(&mut b, &a);
+    let (mut sa, mut sb) = handshake(&a, &b).unwrap();
+    assert!(sa.pq_authenticated && sb.pq_authenticated);
+    for frame in sa.seal(b"hello", NOW).unwrap() {
+        if let Some(message) = sb.open(&frame, NOW).unwrap() {
+            assert_eq!(message, b"hello");
+        }
+    }
+    // With hybrid key exchange too, nothing in the session rests on
+    // classical cryptography alone.
+    a.offer = Offer::with_post_quantum(PostQuantum::Required);
+    b.offer = Offer::with_post_quantum(PostQuantum::Required);
+    let (sa, _) = handshake(&a, &b).unwrap();
+    assert!(sa.pq_authenticated && sa.selected().suite.hybrid());
+}
+
+#[test]
+fn a_bound_peer_cannot_drop_or_fake_its_ml_dsa_proof() {
+    // B's ledger says A has a key. A holds the Ed25519 key (as a quantum
+    // forger would) but does not, or cannot, sign with the ML-DSA key.
+    let mut b = bound(2);
+    let honest = bound(1);
+    learn(&mut b, &honest);
+
+    let silent = Side::new(1, Offer::default());
+    let err = handshake(&silent, &b).unwrap_err();
+    assert!(err.to_string().contains("post-quantum"), "{err}");
+    // As responder too.
+    let mut initiator = bound(2);
+    learn(&mut initiator, &honest);
+    assert!(handshake(&initiator, &silent).is_err());
+
+    // Signing with some other ML-DSA key fails verification.
+    let mut wrong = Side::new(1, Offer::default());
+    wrong.pq = Some(NodeIdentity::from_secret_bytes(&[9; 32]).pq_identity());
+    assert!(handshake(&wrong, &b).is_err());
+}
+
+#[test]
+fn unbound_peers_and_unaware_verifiers_stay_classical() {
+    // A signs with ML-DSA but B's ledger has no key for A: accepted as an
+    // ordinary session, not reported as post-quantum authenticated.
+    let a = bound(1);
+    let b = Side::new(2, Offer::default());
+    let (sa, sb) = handshake(&a, &b).unwrap();
+    assert!(!sa.pq_authenticated && !sb.pq_authenticated);
+    // One direction bound: only that direction is post-quantum authenticated.
+    let mut b = Side::new(2, Offer::default());
+    learn(&mut b, &a);
+    let (sa, sb) = handshake(&a, &b).unwrap();
+    assert!(sb.pq_authenticated, "B verified A's ML-DSA key");
+    assert!(!sa.pq_authenticated, "A had nothing to hold B to");
+}
+
+#[test]
+fn hybrid_authenticated_handshakes_fit_the_message_limit() {
+    let (mut a, mut b) = (bound(1), bound(2));
+    learn(&mut a, &b);
+    learn(&mut b, &a);
+    a.offer = Offer::with_post_quantum(PostQuantum::Required);
+    b.offer = Offer::with_post_quantum(PostQuantum::Required);
+    let (initiator, init) = Initiator::start(&a.config()).unwrap();
+    let HandshakeMsg::Init {
+        sid,
+        offer,
+        suite,
+        noise,
+    } = &init
+    else {
+        unreachable!()
+    };
+    let ResponderStep::Continue(_, resp) = respond(&b.config(), sid, offer, *suite, noise).unwrap()
+    else {
+        unreachable!()
+    };
+    let HandshakeMsg::Resp { noise, .. } = &resp else {
+        unreachable!()
+    };
+    assert!(noise.len() <= MAX_HANDSHAKE_BYTES, "{}", noise.len());
+    let (_, fin) = initiator.on_resp(&a.config(), noise, NOW).unwrap();
+    let size = serde_json::to_vec(&fin).unwrap().len();
+    assert!(size <= MAX_HANDSHAKE_BYTES, "{size}");
 }

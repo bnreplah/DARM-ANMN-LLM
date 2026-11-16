@@ -139,16 +139,24 @@ pub enum Feature {
     Evidence,
     /// Validator-set changes by governance (`ValidatorSetChange`).
     Governance,
+    /// Post-quantum (ML-DSA-65) keys bound to node ids (`PqKeyBind`).
+    PqIdentity,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::Credits, Feature::Evidence, Feature::Governance];
+    pub const ALL: [Feature; 4] = [
+        Feature::Credits,
+        Feature::Evidence,
+        Feature::Governance,
+        Feature::PqIdentity,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Feature::Credits => "credits",
             Feature::Evidence => "evidence",
             Feature::Governance => "governance",
+            Feature::PqIdentity => "pq-identity",
         }
     }
 

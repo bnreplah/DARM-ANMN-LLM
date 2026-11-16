@@ -79,6 +79,8 @@ impl Node {
             network: Hash32::digest("network", b"fabric-latency"),
             offer: Offer::default(),
             limits: SessionLimits::default(),
+            pq: None,
+            pq_keys: None,
         }
     }
 }

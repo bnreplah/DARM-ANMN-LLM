@@ -155,6 +155,12 @@ impl NodeIdentity {
         NodeId(self.key.verifying_key().to_bytes())
     }
 
+    /// This identity's ML-DSA-65 key (see [`crate::pq`]). Derivation costs
+    /// a key generation; callers keep the result.
+    pub fn pq_identity(&self) -> crate::pq::PqIdentity {
+        crate::pq::PqIdentity::derive(&zeroize::Zeroizing::new(self.key.to_bytes()))
+    }
+
     pub fn sign(&self, message: &[u8]) -> Signature {
         Signature::Ed25519(self.key.sign(message).to_bytes())
     }

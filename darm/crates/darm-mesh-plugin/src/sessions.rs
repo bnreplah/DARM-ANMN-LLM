@@ -9,6 +9,7 @@ use crate::config::SessionMode;
 use crate::wire::{Outbound, Wire};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use darm_core::pq::{PqIdentity, PqPublicKey};
 use darm_core::{DarmError, Hash32, NodeId, NodeIdentity, Result};
 use darm_protocol::PostQuantum;
 use darm_protocol::adaptive::{hardware_aes, local_offer};
@@ -17,7 +18,7 @@ use darm_protocol::{
     ResponderStep, Session, SessionLimits, StaticKey, Tuning, respond,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const HANDSHAKE_TIMEOUT_MS: u64 = 20_000;
 pub const INIT_COOLDOWN_MS: u64 = 5_000;
@@ -56,6 +57,10 @@ pub struct Sessions {
     last_attempt: HashMap<String, u64>,
     pub handshakes_completed: u64,
     pub handshakes_failed: u64,
+    /// This node's ML-DSA key, set once the ledger has bound it.
+    pq_identity: Option<PqIdentity>,
+    /// Snapshot of the ledger's bound ML-DSA keys.
+    pq_keys: BTreeMap<NodeId, PqPublicKey>,
 }
 
 impl Sessions {
@@ -76,6 +81,8 @@ impl Sessions {
             last_attempt: HashMap::new(),
             handshakes_completed: 0,
             handshakes_failed: 0,
+            pq_identity: None,
+            pq_keys: BTreeMap::new(),
         })
     }
 
@@ -90,6 +97,8 @@ impl Sessions {
             network,
             offer: self.offer(),
             limits: SessionLimits::default(),
+            pq: self.pq_identity.as_ref(),
+            pq_keys: Some(&self.pq_keys),
         }
     }
 
@@ -133,6 +142,32 @@ impl Sessions {
             self.links.clear();
         }
         self.links.entry(peer.to_string()).or_default()
+    }
+
+    /// Sign bindings with this node's ML-DSA key from now on.
+    pub fn set_pq_identity(&mut self, identity: PqIdentity) {
+        self.pq_identity = Some(identity);
+    }
+
+    /// Whether the session with `peer` was authenticated with ML-DSA too.
+    pub fn pq_authenticated(&self, peer: &str) -> Option<bool> {
+        self.sessions.get(peer).map(|s| s.pq_authenticated)
+    }
+
+    pub fn signs_with_pq(&self) -> bool {
+        self.pq_identity.is_some()
+    }
+
+    pub fn pq_key_count(&self) -> usize {
+        self.pq_keys.len()
+    }
+
+    /// Replace the snapshot of ledger-bound ML-DSA keys. It applies to
+    /// handshakes from now on. Sessions already established stay up, so
+    /// gossip is not interrupted, and are replaced when they expire (within
+    /// the session lifetime, one hour by default).
+    pub fn set_pq_keys(&mut self, keys: BTreeMap<NodeId, PqPublicKey>) {
+        self.pq_keys = keys;
     }
 
     /// Whether `peer` completed a hybrid session (next handshake opens hybrid).
@@ -485,6 +520,7 @@ impl Sessions {
                     "frames_sent": s.frames_sent,
                     "frames_received": s.frames_received,
                     "frames_rejected": s.frames_rejected,
+                    "post_quantum_auth": s.pq_authenticated,
                     "srtt_ms": link.and_then(|l| l.link.srtt_ms),
                     "tuning": self.tuning(peer),
                 })
@@ -495,6 +531,10 @@ impl Sessions {
             "hardware_aes": self.aes,
             "hints": self.hints,
             "post_quantum": self.post_quantum,
+            "post_quantum_auth": {
+                "signing": self.pq_identity.is_some(),
+                "bound_peers_known": self.pq_keys.len(),
+            },
             "local_offer": self.offer(),
             "established": self.sessions.len(),
             "pending": self.initiating.len() + self.responding.len(),

@@ -61,6 +61,41 @@ pub fn verify_equivocation(chain: &Hash32, first: &Vote, second: &Vote) -> Resul
     Ok(())
 }
 
+/// The message a node's ML-DSA key signs to prove it belongs to `node` on
+/// `chain` (domain `pq-key-bind`).
+pub fn pq_bind_message(chain: &Hash32, node: &NodeId) -> Vec<u8> {
+    let mut encoder = Canonical::new("pq-key-bind");
+    encoder.fixed32(chain.as_bytes()).fixed32(node.as_bytes());
+    encoder.as_bytes().to_vec()
+}
+
+/// Check a `PqKeyBind`: a canonical ML-DSA-65 key whose holder signed the
+/// binding to `node` on `chain`.
+pub fn verify_pq_bind(chain: &Hash32, node: &NodeId, key: &[u8], proof: &[u8]) -> Result<()> {
+    crate::pq::PqPublicKey::from_bytes(key)?.verify(
+        "pq-key-bind",
+        &pq_bind_message(chain, node),
+        proof,
+    )
+}
+
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        // Bound the work before decoding: the largest field is a signature.
+        if text.len() > 2 * crate::pq::PQ_SIGNATURE_BYTES {
+            return Err(serde::de::Error::custom("hex field too long"));
+        }
+        hex::decode(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Proposal `kind` that authorises a validator-set change.
 pub const VALIDATOR_SET_KIND: &str = "validator-set";
 /// A change takes effect at least this many blocks after the block that
@@ -171,6 +206,16 @@ pub enum EntryBody {
         members: Vec<Member>,
         effective_height: u64,
     },
+    /// Bind the author's ML-DSA-65 public key to its node id. `proof` is
+    /// that key's signature over [`pq_bind_message`]. One per node, for good:
+    /// the key is derived from the identity, so there is nothing to rotate
+    /// to without a new identity.
+    PqKeyBind {
+        #[serde(with = "hex_bytes")]
+        key: Vec<u8>,
+        #[serde(with = "hex_bytes")]
+        proof: Vec<u8>,
+    },
 }
 
 impl EntryBody {
@@ -180,6 +225,7 @@ impl EntryBody {
             Self::CreditGrant { .. } | Self::ComputeSettle { .. } => Some(super::Feature::Credits),
             Self::Equivocation { .. } => Some(super::Feature::Evidence),
             Self::ValidatorSetChange { .. } => Some(super::Feature::Governance),
+            Self::PqKeyBind { .. } => Some(super::Feature::PqIdentity),
             _ => None,
         }
     }
@@ -291,6 +337,9 @@ impl EntryBody {
                 encoder.u8(11).fixed32(proposal.as_bytes());
                 encode_members(encoder, members, *effective_height);
             }
+            Self::PqKeyBind { key, proof } => {
+                encoder.u8(12).bytes(key).bytes(proof);
+            }
         }
     }
 
@@ -389,6 +438,17 @@ impl EntryBody {
                     ));
                 }
                 super::ValidatorSet::new(members.iter().map(|m| (m.node, m.weight)))?;
+                Ok(())
+            }
+            Self::PqKeyBind { key, proof } => {
+                if key.len() != crate::pq::PQ_PUBLIC_KEY_BYTES
+                    || proof.len() != crate::pq::PQ_SIGNATURE_BYTES
+                {
+                    return Err(DarmError::malformed(
+                        "entry",
+                        "ML-DSA-65 key is 1952 bytes and its signature 3309",
+                    ));
+                }
                 Ok(())
             }
         }

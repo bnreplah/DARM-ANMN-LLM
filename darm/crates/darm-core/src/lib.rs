@@ -25,6 +25,7 @@ pub mod hash;
 pub mod identity;
 pub mod ledger;
 pub mod merkle;
+pub mod pq;
 pub mod time;
 
 pub use error::{DarmError, Result};

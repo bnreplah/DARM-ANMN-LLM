@@ -20,8 +20,11 @@ Ordered by security value first.
    `validator-set` proposal enacts a `ValidatorSetChange` effective at a
    future height, driven by the `darm_gov_*` operations. Remaining:
    validator suspension short of removal.
-4. **Hybrid post-quantum signatures.** Add `Signature::Ed25519MlDsa65` (both
-   must verify) behind the existing algorithm tag.
+4. **Hybrid post-quantum signatures.** Nodes bind an ML-DSA-65 key to their
+   node id on the ledger (`PqKeyBind`, feature `pq-identity`) and sessions
+   with bound peers require both signatures. Remaining: hybrid signatures
+   on block attestations and round votes (changes the block format), then
+   on entries, memories and receipts; key rotation; a hedged signing mode.
 5. **Model embeddings.** An `Embedder` backed by an embedding model served on
    the mesh, with the hashing embedder as fallback.
 6. **Encrypted mesh-scoped memories.** Per-namespace symmetric keys
@@ -46,8 +49,7 @@ Ordered by security value first.
     secret into Noise as a pre-shared key; `preferred` interoperates with
     older nodes (tested against the pre-hybrid release). Remaining:
     switching the default to `preferred` after review of the ML-KEM
-    dependency, and post-quantum signatures (ML-DSA) for identities,
-    memories and votes.
+    dependency. Post-quantum authentication is item 4.
 13. **Fabric carriers with independent streams.** Priority in `darm-fabric`
     acts at the sender's queue; on an ordered carrier (TCP) bytes already
     sent cannot be overtaken. A QUIC carrier with one stream per sync class

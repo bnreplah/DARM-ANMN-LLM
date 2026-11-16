@@ -73,6 +73,9 @@ pub struct Session {
     pub frames_sent: u64,
     pub frames_received: u64,
     pub frames_rejected: u64,
+    /// The peer proved an ML-DSA-65 key bound to its node id on the ledger,
+    /// in addition to its Ed25519 key.
+    pub pq_authenticated: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -134,6 +137,7 @@ impl Session {
             frames_sent: 0,
             frames_received: 0,
             frames_rejected: 0,
+            pq_authenticated: false,
         })
     }
 

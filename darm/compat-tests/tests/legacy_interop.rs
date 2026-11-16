@@ -41,6 +41,8 @@ impl Current {
             network: Hash32::digest("net", b"interop"),
             offer: self.offer.clone(),
             limits: SessionLimits::default(),
+            pq: None,
+            pq_keys: None,
         }
     }
 }
