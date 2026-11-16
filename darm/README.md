@@ -317,6 +317,21 @@ replay and the archive derive it from the ledger, and a removed validator's
 attestations are rejected. Changes take effect in height order and each
 proposal enacts once. `darm_status.ledger.validator_changes` lists them;
 the config's `DARM_VALIDATORS` stays the genesis set.
+
+The operations that drive this (and credit grants, which use the same
+propose, vote, enact flow):
+
+| Operation | What it does |
+|---|---|
+| `darm_gov_propose_validators {members, effective_height}` | Submit the proposal for a complete new set. Refuses a height too close to leave room for the vote. |
+| `darm_gov_vote {proposal, support}` | A validator's vote. |
+| `darm_gov_proposal {proposal}` | Votes so far and `pending`, `passed`, `rejected` or `expired`. |
+| `darm_gov_enact_validators {proposal, members, effective_height}` | Submit the change once passed; arguments must equal what was approved. |
+| `darm_gov_propose_grant {to, amount}` / `darm_gov_enact_grant {proposal, to, amount}` | The same flow for closed-loop credit grants. |
+
+Each is an ordinary signed ledger entry; the operations check locally what
+the ledger will check and say why something would be refused. Only nodes in
+the validator set in force may use them (except `darm_gov_proposal`).
 - **Bounds.** Votes are accepted only from validators, for this height, at
   most 16 rounds ahead; one vote per validator per round and kind is kept.
 

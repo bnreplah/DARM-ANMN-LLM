@@ -263,6 +263,29 @@ impl DarmNode {
                 "not a compute commit or settlement".into(),
             ));
         }
+        self.submit_signed(body, now_ms)
+    }
+
+    /// Sign and submit a governance entry (proposal, vote, validator-set
+    /// change or credit grant) and gossip it.
+    pub fn submit_governance(
+        &mut self,
+        body: EntryBody,
+        now_ms: u64,
+    ) -> Result<(Hash32, Vec<Outbound>)> {
+        if !matches!(
+            body,
+            EntryBody::Proposal { .. }
+                | EntryBody::Vote { .. }
+                | EntryBody::ValidatorSetChange { .. }
+                | EntryBody::CreditGrant { .. }
+        ) {
+            return Err(DarmError::Rejected("not a governance entry".into()));
+        }
+        self.submit_signed(body, now_ms)
+    }
+
+    fn submit_signed(&mut self, body: EntryBody, now_ms: u64) -> Result<(Hash32, Vec<Outbound>)> {
         let entry = self.sign_entry(body, now_ms)?;
         let id = entry.id();
         self.ledger.submit(entry.clone(), now_ms)?;

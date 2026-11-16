@@ -12,15 +12,14 @@ Ordered by security value first.
    votes, and commit certificates carried in the block, so an equivocating
    proposer costs a round instead of stalling the height. Remaining:
    - automate the response to recorded equivocation: today a validator
-     drafts a `validator-set` proposal by hand (item 3 is in place);
+     decides to run `darm_gov_propose_validators` (item 3 is in place);
    - make `locking` the default once the above has run on a real mesh;
    - switch consensus through the activation schedule (`DARM_ACTIVATE`,
      added for credits) so operators cannot switch inconsistently.
 3. **Validator-set governance (done, behind `governance`).** A passed
    `validator-set` proposal enacts a `ValidatorSetChange` effective at a
-   future height. Remaining: plugin operations to draft and enact a change
-   (today it is two ledger entries submitted by hand), and validator
-   suspension short of removal.
+   future height, driven by the `darm_gov_*` operations. Remaining:
+   validator suspension short of removal.
 4. **Hybrid post-quantum signatures.** Add `Signature::Ed25519MlDsa65` (both
    must verify) behind the existing algorithm tag.
 5. **Model embeddings.** An `Embedder` backed by an embedding model served on

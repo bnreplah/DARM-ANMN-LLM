@@ -27,6 +27,7 @@ pub mod chat;
 pub mod compute;
 pub mod compute_ops;
 pub mod config;
+pub mod governance_ops;
 pub mod node;
 pub mod ops;
 pub mod sessions;
