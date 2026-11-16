@@ -92,6 +92,8 @@ pub struct LedgerState {
     /// Governed validator sets by the height they take effect from.
     validator_changes: BTreeMap<u64, ValidatorSet>,
     enacted: BTreeSet<Hash32>,
+    /// ML-DSA-65 public keys bound to node ids.
+    pq_keys: BTreeMap<NodeId, crate::pq::PqPublicKey>,
     issued: u64,
 }
 
@@ -268,6 +270,19 @@ impl LedgerState {
                 block_timestamp_ms,
                 validators,
             )?,
+            EntryBody::PqKeyBind { key, .. } => {
+                // The proof was verified before apply (Ledger::admits).
+                if !validators.contains(&author) && !self.registrations.contains_key(&author) {
+                    return Err(DarmError::Rejected(
+                        "only registered nodes and validators bind a key".into(),
+                    ));
+                }
+                if self.pq_keys.contains_key(&author) {
+                    return Err(DarmError::Duplicate);
+                }
+                self.pq_keys
+                    .insert(author, crate::pq::PqPublicKey::from_bytes(key)?);
+            }
             EntryBody::Equivocation { first, .. } => {
                 // Signatures were checked against the chain id before apply
                 // (Ledger::admits); here only state rules remain.
@@ -445,6 +460,15 @@ impl LedgerState {
     /// Scheduled and past validator-set changes, by effective height.
     pub fn validator_changes(&self) -> impl Iterator<Item = (&u64, &ValidatorSet)> {
         self.validator_changes.iter()
+    }
+
+    /// The ML-DSA-65 key bound to `node`, if it has bound one.
+    pub fn pq_key(&self, node: &NodeId) -> Option<&crate::pq::PqPublicKey> {
+        self.pq_keys.get(node)
+    }
+
+    pub fn pq_keys(&self) -> &BTreeMap<NodeId, crate::pq::PqPublicKey> {
+        &self.pq_keys
     }
 
     /// Equivocations recorded against `validator`.

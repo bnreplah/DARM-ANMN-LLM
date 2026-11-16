@@ -1431,3 +1431,90 @@ fn governance_operations_remove_a_validator_and_grant_credits() {
     };
     assert!(gov::vote(&mut nodes[3], args, clock).is_err());
 }
+
+/// Three validators on a chain with `pq-identity` active, run until every
+/// node's ML-DSA key is bound, then reconnected. Returns the nodes, their
+/// config and the time of the reconnect.
+fn pq_bound_nodes() -> (Vec<DarmNode>, DarmConfig, u64) {
+    let mut config = validator_config(&[1, 2, 3], true);
+    config
+        .activations
+        .insert(darm_core::ledger::Feature::PqIdentity, 0);
+    let mut nodes: Vec<DarmNode> = (1..=3).map(|s| node(s, config.clone())).collect();
+    connect(&mut nodes, NOW);
+    assert_eq!(nodes[0].sessions.pq_authenticated("peer1"), Some(false));
+    // Each node submits its key binding; a few rounds finalize all three.
+    for t in 1..=12 {
+        tick_all(&mut nodes, NOW + t * 10_000, &[]);
+    }
+    for n in &nodes {
+        assert_eq!(n.ledger().state().pq_keys().len(), 3, "all keys bound");
+        assert!(n.sessions.signs_with_pq());
+    }
+    // Sessions made before the bindings stay up (no gossip gap) but are
+    // not counted as post-quantum authenticated.
+    assert_eq!(nodes[0].sessions.pq_authenticated("peer1"), Some(false));
+    for (i, n) in nodes.iter_mut().enumerate() {
+        for j in (0..3).filter(|j| *j != i) {
+            n.sessions.close(&format!("peer{j}"));
+        }
+    }
+    let later = NOW + 200_000;
+    connect(&mut nodes, later);
+    (nodes, config, later)
+}
+
+#[test]
+fn nodes_bind_ml_dsa_keys_and_then_authenticate_sessions_with_them() {
+    let (mut nodes, _, later) = pq_bound_nodes();
+    for (i, n) in nodes.iter().enumerate() {
+        for j in (0..3).filter(|j| *j != i) {
+            assert_eq!(n.sessions.pq_authenticated(&format!("peer{j}")), Some(true));
+        }
+    }
+    // Gossip flows over the new sessions.
+    let (id, out) = nodes[0]
+        .remember_exchange("where are the runbooks?", "in ops/", "m", "default", later)
+        .unwrap();
+    let out = nodes[0].finalize(out, later);
+    assert!(out.iter().all(|o| matches!(o.message, Wire::Sealed { .. })));
+    pump(&mut nodes, out.into_iter().map(|o| (0, o)).collect(), later);
+    for t in 1..=5 {
+        tick_all(&mut nodes, later + t * 1_000, &[]);
+    }
+    assert!(
+        nodes[2].memory().contains(&id),
+        "memory arrived over the new sessions"
+    );
+    let status = nodes[0].status(later);
+    assert_eq!(status["sessions"]["post_quantum_auth"]["signing"], true);
+    assert_eq!(
+        status["sessions"]["post_quantum_auth"]["bound_peers_known"],
+        3
+    );
+}
+
+#[test]
+fn a_bound_node_restarting_with_an_empty_ledger_can_still_sync() {
+    // It does not yet know its own key is bound. Peers require its ML-DSA
+    // proof all the same, so it must sign from the start or it could never
+    // sync (a deadlock an earlier version of this code had).
+    let (mut nodes, config, later) = pq_bound_nodes();
+    let height = nodes[0].ledger().height();
+    nodes[2] = node(3, config);
+    assert_eq!(nodes[2].ledger().height(), 0);
+    let restart = later + 100_000;
+    for n in nodes.iter_mut().take(2) {
+        n.sessions.close("peer2");
+    }
+    connect(&mut nodes, restart);
+    assert_eq!(nodes[0].sessions.pq_authenticated("peer2"), Some(true));
+    for t in 1..=8 {
+        tick_all(&mut nodes, restart + t * 10_000, &[]);
+    }
+    assert!(
+        nodes[2].ledger().height() >= height,
+        "restarted node synced"
+    );
+    assert_eq!(nodes[2].ledger().state().pq_keys().len(), 3);
+}

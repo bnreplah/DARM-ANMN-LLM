@@ -28,13 +28,17 @@ use crate::suite::{Offer, Selected, Suite, negotiate};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use darm_core::canonical::Canonical;
+use darm_core::pq::{PqIdentity, PqPublicKey};
 use darm_core::{DarmError, Hash32, NodeId, NodeIdentity, Result, Signature};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
+/// Domain of the ML-DSA signature in a [`Binding`].
+const PQ_BIND_DOMAIN: &str = "session-bind-pq";
 /// Upper bound on any handshake message (base64 noise payloads included).
-pub const MAX_HANDSHAKE_BYTES: usize = 8 * 1024;
-const NOISE_BUF: usize = 4 * 1024;
+pub const MAX_HANDSHAKE_BYTES: usize = 20 * 1024;
+const NOISE_BUF: usize = 12 * 1024;
 
 const ROLE_INITIATOR: u8 = 1;
 const ROLE_RESPONDER: u8 = 2;
@@ -89,13 +93,24 @@ pub struct HandshakeConfig<'a> {
     pub network: Hash32,
     pub offer: Offer,
     pub limits: SessionLimits,
+    /// This node's ML-DSA key, once it is bound on the ledger: bindings
+    /// then carry a second, post-quantum signature.
+    pub pq: Option<&'a PqIdentity>,
+    /// ML-DSA keys bound to node ids on the ledger. A peer listed here MUST
+    /// prove its ML-DSA key as well as its Ed25519 key.
+    pub pq_keys: Option<&'a BTreeMap<NodeId, PqPublicKey>>,
 }
 
-/// Ed25519 proof that `node` owns the Noise static key used in a session.
+/// Proof that `node` owns the Noise static key used in a session: an Ed25519
+/// signature, plus an ML-DSA-65 signature over the same message when the
+/// node has bound a post-quantum key on the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Binding {
     pub node: NodeId,
     pub signature: Signature,
+    /// Base64 ML-DSA-65 signature. Older nodes ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq: Option<String>,
 }
 
 fn binding_message(
@@ -127,22 +142,47 @@ impl Binding {
         Self {
             node: config.identity.node_id(),
             signature: config.identity.sign(&message),
+            pq: config
+                .pq
+                .map(|pq| B64.encode(pq.sign(PQ_BIND_DOMAIN, &message))),
         }
     }
 
+    /// Verify the binding. Returns whether the peer also proved a
+    /// ledger-bound ML-DSA key.
     fn verify(
         &self,
-        network: &Hash32,
+        config: &HandshakeConfig<'_>,
         sid: &[u8; 16],
         role: u8,
         handshake_hash: &[u8],
         remote_static: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let remote: [u8; 32] = remote_static
             .and_then(|key| key.try_into().ok())
             .ok_or_else(|| DarmError::Rejected("peer sent no static key".into()))?;
-        let message = binding_message(network, sid, role, handshake_hash, &remote);
-        self.node.verify(&message, &self.signature)
+        let message = binding_message(&config.network, sid, role, handshake_hash, &remote);
+        self.node.verify(&message, &self.signature)?;
+        let Some(key) = config.pq_keys.and_then(|keys| keys.get(&self.node)) else {
+            // No key on the ledger for this node: nothing to hold it to. A
+            // `pq` field it sent anyway proves nothing and is ignored.
+            return Ok(false);
+        };
+        // The ledger says this node has a post-quantum key, so an Ed25519
+        // signature alone is no longer enough: leaving `pq` out must fail,
+        // or a forger of Ed25519 would simply omit it.
+        let signature = self
+            .pq
+            .as_deref()
+            .filter(|text| text.len() <= 2 * darm_core::pq::PQ_SIGNATURE_BYTES)
+            .and_then(|text| B64.decode(text).ok())
+            .ok_or_else(|| {
+                DarmError::Rejected(
+                    "peer has a post-quantum key on the ledger but did not prove it".into(),
+                )
+            })?;
+        key.verify(PQ_BIND_DOMAIN, &message, &signature)?;
+        Ok(true)
     }
 }
 
@@ -349,8 +389,8 @@ impl Initiator {
             .map_err(noise_err)?;
         let resp: RespPayload = serde_json::from_slice(&payload[..len])
             .map_err(|e| DarmError::malformed("handshake payload", e.to_string()))?;
-        resp.bind.verify(
-            &config.network,
+        let pq_authenticated = resp.bind.verify(
+            config,
             &self.sid,
             ROLE_RESPONDER,
             &responder_hash,
@@ -393,7 +433,7 @@ impl Initiator {
             .state
             .write_message(&fin, &mut buf)
             .map_err(noise_err)?;
-        let session = Session::establish(
+        let mut session = Session::establish(
             self.state,
             self.sid,
             resp.bind.node,
@@ -402,6 +442,7 @@ impl Initiator {
             config.limits,
             now_ms,
         )?;
+        session.pq_authenticated = pq_authenticated;
         Ok((
             session,
             HandshakeMsg::Fin {
@@ -499,8 +540,8 @@ impl PendingResponder {
             .map_err(noise_err)?;
         let fin: FinPayload = serde_json::from_slice(&payload[..len])
             .map_err(|e| DarmError::malformed("handshake payload", e.to_string()))?;
-        fin.bind.verify(
-            &config.network,
+        let pq_authenticated = fin.bind.verify(
+            config,
             &self.sid,
             ROLE_INITIATOR,
             &initiator_hash,
@@ -510,7 +551,7 @@ impl PendingResponder {
             return Err(DarmError::Rejected("handshake with ourselves".into()));
         }
         self.peer = fin.bind.node;
-        Session::establish(
+        let mut session = Session::establish(
             self.state,
             self.sid,
             self.peer,
@@ -518,7 +559,9 @@ impl PendingResponder {
             false,
             config.limits,
             now_ms,
-        )
+        )?;
+        session.pq_authenticated = pq_authenticated;
+        Ok(session)
     }
 }
 

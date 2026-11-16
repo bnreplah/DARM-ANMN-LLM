@@ -163,6 +163,9 @@ impl Ledger {
                 super::EntryBody::Equivocation { first, second } => {
                     super::entry::verify_equivocation(&self.chain_id, first, second)
                 }
+                super::EntryBody::PqKeyBind { key, proof } => {
+                    super::entry::verify_pq_bind(&self.chain_id, &entry.entry.author, key, proof)
+                }
                 super::EntryBody::ValidatorSetChange {
                     effective_height, ..
                 } if *effective_height < height + super::VALIDATOR_CHANGE_DELAY => {
@@ -552,5 +555,7 @@ mod credit_tests;
 mod evidence_tests;
 #[cfg(test)]
 mod governance_tests;
+#[cfg(test)]
+mod pq_tests;
 #[cfg(test)]
 mod tests;
