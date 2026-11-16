@@ -21,6 +21,7 @@
 //!   Noise handshakes bound to DARM identities, negotiated per peer pair,
 //!   with sealed, padded frames and link/device-aware tuning.
 
+pub mod agent_card_ops;
 pub mod archive;
 pub mod audit_ops;
 pub mod chat;

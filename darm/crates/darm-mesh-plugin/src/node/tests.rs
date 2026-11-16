@@ -1431,3 +1431,70 @@ fn governance_operations_remove_a_validator_and_grant_credits() {
     };
     assert!(gov::vote(&mut nodes[3], args, clock).is_err());
 }
+
+#[test]
+fn agent_cards_are_signed_by_the_node_and_judged_against_the_ledger() {
+    use crate::agent_card_ops::{self as cards, AgentCardArgs, InterfaceArg, VerifyCardArgs};
+
+    let config = validator_config(&[1], true);
+    let validator = node(1, config.clone());
+    let stranger = node(7, config);
+    let args = || AgentCardArgs {
+        interfaces: vec![InterfaceArg {
+            url: "https://agent.example/a2a/v1".into(),
+            protocol_binding: None,
+            protocol_version: None,
+        }],
+        name: None,
+        description: None,
+        provider_organization: None,
+        provider_url: None,
+        documentation_url: None,
+        jwks_url: Some("https://agent.example/.well-known/jwks.json".into()),
+    };
+    let built = cards::card(&validator, args()).unwrap();
+    assert_eq!(
+        built["card"]["supportedInterfaces"][0]["protocolBinding"],
+        "JSONRPC"
+    );
+    assert_eq!(
+        built["jwks"]["keys"][0]["kid"],
+        validator.node_id().to_hex()
+    );
+
+    // Another node on the chain recognises the validator's card.
+    let judged = cards::verify(
+        &stranger,
+        VerifyCardArgs {
+            card: built["card"].clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(judged["valid_darm_signatures"], 1);
+    assert_eq!(judged["signers"][0]["validator"], true);
+    assert_eq!(judged["vouched_by_ledger"], true);
+
+    // A validly signed card from a node the chain does not know is not vouched.
+    let unknown = cards::card(&stranger, args()).unwrap();
+    let judged = cards::verify(
+        &validator,
+        VerifyCardArgs {
+            card: unknown["card"].clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(judged["valid_darm_signatures"], 1);
+    assert_eq!(judged["vouched_by_ledger"], false);
+
+    // A tampered card has no valid signature at all.
+    let mut tampered = built["card"].clone();
+    tampered["supportedInterfaces"][0]["url"] = json!("https://evil.example/a2a");
+    let judged = cards::verify(&stranger, VerifyCardArgs { card: tampered }).unwrap();
+    assert_eq!(judged["valid_darm_signatures"], 0);
+    assert_eq!(judged["vouched_by_ledger"], false);
+
+    // No A2A interface, no card.
+    let mut none = args();
+    none.interfaces.clear();
+    assert!(cards::card(&validator, none).is_err());
+}

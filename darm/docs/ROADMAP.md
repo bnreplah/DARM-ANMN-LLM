@@ -64,3 +64,9 @@ Ordered by security value first.
     path report outcomes automatically (for example from user corrections),
     a way to share outcome evidence that cannot be used to promote poisoned
     memories, and feeding outcomes into author trust.
+17. **A2A interoperability.** Nodes sign A2A v1.0 Agent Cards with their
+    ledger identity and judge other agents' cards against the ledger
+    (`darm_agent_card`, `darm_agent_card_verify`). Remaining: an A2A endpoint
+    (message send and task handling mapped onto a `darm` turn), running the
+    A2A conformance kit, and recording card hashes on the ledger so a card
+    can be revoked.

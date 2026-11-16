@@ -30,6 +30,7 @@
 //! secret is ever written to disk.
 
 pub mod adaptive;
+pub mod agent_card;
 pub mod handshake;
 pub mod hybrid;
 pub mod replay;

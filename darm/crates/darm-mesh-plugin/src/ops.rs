@@ -124,6 +124,7 @@ pub fn manifest_entries() -> Vec<ManifestEntry> {
     .chain(crate::compute_ops::manifest_entries())
     .chain(crate::audit_ops::manifest_entries())
     .chain(crate::governance_ops::manifest_entries())
+    .chain(crate::agent_card_ops::manifest_entries())
     .collect()
 }
 
@@ -302,6 +303,7 @@ pub fn router(node: SharedNode) -> OperationRouter {
     crate::compute_ops::register(&mut router, &node);
     crate::audit_ops::register(&mut router, &node);
     crate::governance_ops::register(&mut router, &node);
+    crate::agent_card_ops::register(&mut router, &node);
     router
 }
 
