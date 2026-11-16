@@ -39,6 +39,8 @@ impl Node {
             network: self.network,
             offer: Offer::default(),
             limits: SessionLimits::default(),
+            pq: None,
+            pq_keys: None,
         }
     }
 }
