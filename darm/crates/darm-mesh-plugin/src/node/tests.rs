@@ -1286,3 +1286,148 @@ fn equivocating_validator_is_recorded_on_every_replica() {
         assert_eq!(n.ledger().state().equivocations(&cheat.node_id()), 1);
     }
 }
+
+#[test]
+fn governance_operations_remove_a_validator_and_grant_credits() {
+    use crate::governance_ops::{self as gov, *};
+    use darm_core::ledger::Feature;
+
+    let mut config = locking_config(&[1, 2, 3, 4]);
+    config.activations.insert(Feature::Governance, 0);
+    config.activations.insert(Feature::Credits, 0);
+    let mut nodes: Vec<DarmNode> = (1..=4).map(|s| node(s, config.clone())).collect();
+    let mut clock = NOW;
+    // Deliver an operation's gossip, then run rounds until it is finalized.
+    fn settle(nodes: &mut [DarmNode], clock: &mut u64, from: usize, out: Vec<Outbound>) {
+        pump_live(
+            nodes,
+            out.into_iter().map(|o| (from, o)).collect(),
+            *clock,
+            &[],
+        );
+        for _ in 0..12 {
+            *clock += ROUND_TIMEOUT_MS;
+            tick_all(nodes, *clock, &[]);
+        }
+    }
+    settle(&mut nodes, &mut clock, 0, Vec::new());
+    let member = |seed: u8| MemberArg {
+        node: identity(seed).node_id().to_string(),
+        weight: 1,
+    };
+    let keep = || vec![member(1), member(2), member(3)];
+    let effective = nodes[0].ledger().height() + 8;
+
+    // Too soon is refused with the earliest usable height.
+    let soon = ProposeValidatorsArgs {
+        members: keep(),
+        effective_height: nodes[0].ledger().height() + 2,
+        deadline_minutes: None,
+    };
+    assert!(gov::propose_validators(&mut nodes[0], soon, clock).is_err());
+
+    let (response, out) = gov::propose_validators(
+        &mut nodes[0],
+        ProposeValidatorsArgs {
+            members: keep(),
+            effective_height: effective,
+            deadline_minutes: Some(60),
+        },
+        clock,
+    )
+    .unwrap();
+    let proposal = response["proposal"].as_str().unwrap().to_string();
+    settle(&mut nodes, &mut clock, 0, out);
+
+    // Enacting before the vote is refused locally.
+    let enact = || EnactValidatorsArgs {
+        proposal: proposal.clone(),
+        members: keep(),
+        effective_height: effective,
+    };
+    let err = gov::enact_validators(&mut nodes[0], enact(), clock).unwrap_err();
+    assert!(format!("{err:?}").contains("pending"), "{err:?}");
+
+    for i in 0..3 {
+        let args = VoteArgs {
+            proposal: proposal.clone(),
+            support: true,
+        };
+        let (_, out) = gov::vote(&mut nodes[i], args, clock).unwrap();
+        settle(&mut nodes, &mut clock, i, out);
+    }
+    let shown = gov::proposal(
+        &nodes[3],
+        ProposalArgs {
+            proposal: proposal.clone(),
+        },
+        clock,
+    )
+    .unwrap();
+    assert_eq!(shown["outcome"], "passed");
+
+    // Different members than approved are refused; the approved set enacts.
+    let wrong = EnactValidatorsArgs {
+        members: vec![member(1), member(2)],
+        ..enact()
+    };
+    assert!(gov::enact_validators(&mut nodes[1], wrong, clock).is_err());
+    let (_, out) = gov::enact_validators(&mut nodes[1], enact(), clock).unwrap();
+    settle(&mut nodes, &mut clock, 1, out);
+    assert!(nodes[0].ledger().height() < effective, "delay leaves room");
+
+    // A credit grant goes through the same flow while the chain advances.
+    let to = identity(2).node_id().to_string();
+    let (response, out) = gov::propose_grant(
+        &mut nodes[2],
+        ProposeGrantArgs {
+            to: to.clone(),
+            amount: 500,
+            deadline_minutes: None,
+        },
+        clock,
+    )
+    .unwrap();
+    let grant = response["proposal"].as_str().unwrap().to_string();
+    settle(&mut nodes, &mut clock, 2, out);
+    for i in 0..3 {
+        let args = VoteArgs {
+            proposal: grant.clone(),
+            support: true,
+        };
+        let (_, out) = gov::vote(&mut nodes[i], args, clock).unwrap();
+        settle(&mut nodes, &mut clock, i, out);
+    }
+    let (_, out) = gov::enact_grant(
+        &mut nodes[0],
+        EnactGrantArgs {
+            proposal: grant.clone(),
+            to,
+            amount: 500,
+        },
+        clock,
+    )
+    .unwrap();
+    settle(&mut nodes, &mut clock, 0, out);
+
+    assert!(
+        nodes[0].ledger().height() + 1 >= effective,
+        "chain reached the change"
+    );
+    let head = nodes[0].ledger().head_hash();
+    for n in &nodes {
+        assert_eq!(n.ledger().head_hash(), head);
+        assert_eq!(n.ledger().validators().len(), 3);
+        assert!(!n.ledger().is_validator(&identity(4).node_id()));
+        assert_eq!(
+            n.ledger().state().credit_balance(&identity(2).node_id()),
+            500
+        );
+    }
+    // The removed validator can no longer use validator operations.
+    let args = VoteArgs {
+        proposal: grant,
+        support: true,
+    };
+    assert!(gov::vote(&mut nodes[3], args, clock).is_err());
+}
