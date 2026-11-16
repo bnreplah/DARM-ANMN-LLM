@@ -61,7 +61,8 @@ Ordered by security value first.
     reports so other nodes learn from them, automatic auditor dispatch, and a
     verifiable random function for the beacon.
 16. **Outcome learning beyond one node.** `darm_memory_outcome` scores
-    memories from the caller's reports, locally. Remaining: have the chat
-    path report outcomes automatically (for example from user corrections),
+    memories from the caller's reports, and the chat path reports
+    automatically from usage and the user's follow-up, locally. Remaining:
+    a better "used" signal than word overlap, non-English corrections,
     a way to share outcome evidence that cannot be used to promote poisoned
     memories, and feeding outcomes into author trust.

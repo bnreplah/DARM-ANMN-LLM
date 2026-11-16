@@ -250,3 +250,97 @@ async fn all_routes_failing_returns_last_failure() {
     assert!(out.is_empty());
     assert_eq!(node.lock().unwrap().counters.turns_failed, 1);
 }
+
+#[tokio::test]
+async fn follow_ups_score_the_memories_an_answer_used() {
+    const ANSWER: &str =
+        "They are in the ops repository under docs/incident; the platform team maintains them.";
+    let node = shared_node(DarmConfig::default());
+    let seeded = {
+        let mut n = node.lock().unwrap();
+        let (id, _) = n
+            .remember_exchange(
+                "where are the runbooks?",
+                "The runbooks live in the ops repository under docs/incident, maintained by the platform team.",
+                "m",
+                "default",
+                now_ms(),
+            )
+            .unwrap();
+        id
+    };
+    let usefulness = |node: &Arc<Mutex<DarmNode>>| {
+        let mut n = node.lock().unwrap();
+        let hits = n.recall("where are the runbooks?", "default", 5, now_ms());
+        let hit = hits.iter().find(|h| h.id == seeded).expect("seeded memory");
+        (hit.usefulness, hit.outcomes)
+    };
+    let turn = |messages: Value, reply: &'static str| {
+        let node = Arc::clone(&node);
+        async move {
+            let request = json!({"messages": messages, "darm": {"remember": false}});
+            let (response, _) = handle(
+                invocation(request, vec![candidate("model-a", "n1")]),
+                node,
+                move |_| async move { Ok(completion(reply)) },
+            )
+            .await;
+            assert_eq!(response.status_code, 200);
+        }
+    };
+    let question = json!({"role": "user", "content": "where can I find the runbooks?"});
+    let answer = json!({"role": "assistant", "content": ANSWER});
+
+    // The answer draws on the memory: it waits for the user's reaction.
+    turn(json!([question]), ANSWER).await;
+    assert_eq!(node.lock().unwrap().auto.waiting(), 1);
+    assert_eq!(usefulness(&node).1, 0, "nothing reported yet");
+
+    // The user objects: the memory is scored as having hurt. The reply to
+    // the objection ignores the memory, so nothing new waits.
+    turn(
+        json!([question, answer, {"role": "user", "content": "No, that's wrong, they moved."}]),
+        "Sorry about that.",
+    )
+    .await;
+    let (after_hurt, outcomes) = usefulness(&node);
+    assert_eq!(outcomes, 1);
+    assert!(after_hurt < 0.5, "{after_hurt}");
+    assert_eq!(node.lock().unwrap().auto.reported_hurt, 1);
+    assert_eq!(node.lock().unwrap().auto.waiting(), 0);
+
+    // Another conversation continues without objection: scored as helped.
+    turn(json!([question]), ANSWER).await;
+    turn(
+        json!([question, answer, {"role": "user", "content": "Thanks. Who is on call?"}]),
+        "I do not have that.",
+    )
+    .await;
+    let (after_help, outcomes) = usefulness(&node);
+    assert_eq!(outcomes, 2);
+    assert!(after_help > after_hurt);
+    assert_eq!(node.lock().unwrap().auto.reported_helped, 1);
+
+    // An answer that ignores the memory is never scored.
+    turn(json!([question]), "I am not sure.").await;
+    assert_eq!(node.lock().unwrap().auto.waiting(), 0);
+}
+
+#[tokio::test]
+async fn automatic_outcomes_are_off_on_a_public_mesh_unless_configured() {
+    let node = shared_node(DarmConfig::default());
+    assert!(node.lock().unwrap().auto_outcome_enabled());
+    node.lock().unwrap().set_public_mesh(true);
+    assert!(!node.lock().unwrap().auto_outcome_enabled());
+    let forced = shared_node(DarmConfig {
+        auto_outcome: Some(true),
+        ..DarmConfig::default()
+    });
+    forced.lock().unwrap().set_public_mesh(true);
+    assert!(forced.lock().unwrap().auto_outcome_enabled());
+    let off = shared_node(DarmConfig {
+        auto_outcome: Some(false),
+        ..DarmConfig::default()
+    });
+    assert!(!off.lock().unwrap().auto_outcome_enabled());
+}

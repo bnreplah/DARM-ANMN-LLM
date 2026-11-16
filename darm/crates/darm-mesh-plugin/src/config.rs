@@ -111,6 +111,9 @@ pub struct DarmConfig {
     pub trusted_authors: Vec<NodeId>,
     /// Store chat exchanges as (local) episodic memories.
     pub remember: bool,
+    /// Infer outcome reports from conversations (`DARM_AUTO_OUTCOME`).
+    /// `None`: on, except on a public mesh.
+    pub auto_outcome: Option<bool>,
     /// Make new memories mesh-scoped and gossip them.
     pub share: bool,
     /// Allow memory/ledger gossip on a public mesh.
@@ -163,6 +166,7 @@ impl Default for DarmConfig {
             validators: Vec::new(),
             trusted_authors: Vec::new(),
             remember: true,
+            auto_outcome: None,
             share: false,
             allow_public_gossip: false,
             propose_replication: false,
@@ -316,6 +320,10 @@ impl DarmConfig {
             validators: node_list("DARM_VALIDATORS")?,
             trusted_authors: node_list("DARM_TRUSTED_AUTHORS")?,
             remember: flag("DARM_REMEMBER", defaults.remember),
+            auto_outcome: match std::env::var("DARM_AUTO_OUTCOME") {
+                Ok(_) => Some(flag("DARM_AUTO_OUTCOME", true)),
+                Err(_) => defaults.auto_outcome,
+            },
             share: flag("DARM_SHARE", defaults.share),
             allow_public_gossip: flag("DARM_ALLOW_PUBLIC_GOSSIP", defaults.allow_public_gossip),
             propose_replication: flag("DARM_PROPOSE_REPLICATION", defaults.propose_replication),

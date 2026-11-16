@@ -146,6 +146,22 @@ pub fn last_user_text(request: &Value) -> Option<String> {
         .and_then(content_text)
 }
 
+/// The assistant message just before the latest user message, if any: the
+/// answer the user is now reacting to.
+fn previous_assistant_text(request: &Value) -> Option<String> {
+    let messages = request.get("messages")?.as_array()?;
+    let role = |m: &Value| m.get("role").and_then(Value::as_str).map(str::to_owned);
+    let last_user = messages
+        .iter()
+        .rposition(|m| role(m).as_deref() == Some("user"))?;
+    messages[..last_user]
+        .iter()
+        .rev()
+        .find(|m| role(m).as_deref() == Some("assistant"))
+        .and_then(|m| m.get("content"))
+        .and_then(content_text)
+}
+
 /// Insert the memory block after any leading system messages so the
 /// operator's own system prompt keeps precedence.
 pub fn inject_memory(request: &mut Value, context: String) {
@@ -277,22 +293,28 @@ fn prepare(request: &mut Value, node: &SharedNode) -> Result<Prepared, VirtualMo
     })
 }
 
-/// Phase 1: inject recalled memories. Returns the number injected.
+/// Phase 1: inject recalled memories. Returns their ids and contents.
 fn recall_into(
     request: &mut Value,
     query: Option<&str>,
     node: &SharedNode,
     prepared: &Prepared,
-) -> usize {
+) -> Vec<(darm_core::Hash32, String)> {
     let options = &prepared.options;
     let Some(query) = query.filter(|_| options.recall && options.top_k > 0) else {
-        return 0;
+        return Vec::new();
     };
-    let hits = lock(node).recall(query, &options.namespace, options.top_k, now_ms());
+    let now = now_ms();
+    let mut node = lock(node);
+    // The user's message is also their reaction to the previous answer.
+    if let Some(previous) = previous_assistant_text(request) {
+        node.auto_follow_up(&options.namespace, &previous, query, now);
+    }
+    let hits = node.recall(query, &options.namespace, options.top_k, now);
     if let Some(context) = render_context(&hits, prepared.budget_chars) {
         inject_memory(request, context);
     }
-    hits.len()
+    hits.into_iter().map(|h| (h.id, h.record.content)).collect()
 }
 
 /// Phase 2a: order candidate routes by pheromone desirability.
@@ -383,7 +405,7 @@ fn learn(
     node: &SharedNode,
     routed: Routed,
     query: Option<&str>,
-    recalled: usize,
+    recalled: &[(darm_core::Hash32, String)],
     prepared: &Prepared,
 ) -> (VirtualModelResponse, Vec<Outbound>) {
     let Routed {
@@ -393,7 +415,7 @@ fn learn(
     } = routed;
     let mut node = lock(node);
     let mut headers = vec![
-        ("x-darm-memories".to_string(), recalled.to_string()),
+        ("x-darm-memories".to_string(), recalled.len().to_string()),
         ("x-darm-route".to_string(), route.model.clone()),
         ("x-darm-node".to_string(), node.node_id().short()),
     ];
@@ -402,6 +424,9 @@ fn learn(
     }
     let mut outbound = Vec::new();
     let options = &prepared.options;
+    if ok && let (Some(user), Some(answer)) = (query, assistant_text(&response.body)) {
+        node.auto_after_turn(&options.namespace, user, &answer, recalled, now_ms());
+    }
     if ok
         && options.remember
         && let (Some(user), Some(answer)) = (query, assistant_text(&response.body))
@@ -468,7 +493,7 @@ where
         }
     }
     match routed {
-        Ok(routed) => learn(&node, routed, query.as_deref(), recalled, &prepared),
+        Ok(routed) => learn(&node, routed, query.as_deref(), &recalled, &prepared),
         Err(mut failure) => {
             failure.event_stream = prepared.requested_stream && failure.status_code < 400;
             (failure, Vec::new())
