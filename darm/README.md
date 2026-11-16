@@ -637,3 +637,42 @@ submission, never proposed, and a block containing one is rejected. Compare
 height arrives; nodes with different schedules fork at the first height where
 they differ. The schedule is not part of the genesis hash, so a running chain
 can add one.
+
+## A2A Agent Cards
+
+[A2A](https://a2a-protocol.org/latest/specification/) (Agent2Agent, v1.0) is
+the Linux Foundation protocol agents use to find and call each other. An
+agent publishes an *Agent Card* at `/.well-known/agent-card.json`, optionally
+signed. DARM ties that signature to the ledger:
+
+- `darm_agent_card {interfaces: [{url}], jwks_url?}` returns a v1.0 card
+  for this node, signed with the node's ledger key, plus a JWKS document.
+  The signature is a JWS (RFC 7515, `alg` `EdDSA`) over the card
+  canonicalized with RFC 8785, `signatures` excluded, as A2A section 8.4
+  specifies. The key id is the node id, which is the Ed25519 public key
+  itself. A `urn:darm-ann:agent-identity:v1` extension names the node and
+  chain.
+- `darm_agent_card_verify {card}` checks those signatures on any card and
+  reports, for each valid signer, whether this node's ledger knows it
+  (registered, validator, reputation, recorded equivocations).
+  `vouched_by_ledger` is true only when a signer is known to the chain and
+  the card names that signer and this chain.
+
+Limits:
+
+- **This is not an A2A server.** The plugin has no A2A endpoint; you list
+  the URL of one you run (for example a gateway in front of the mesh's
+  OpenAI-compatible API) and host the card and JWKS there. Without such an
+  endpoint there is nothing to publish, and the operation refuses.
+- A valid signature proves which node published the card, not that the agent
+  behaves well.
+- Only signatures whose key id is a DARM node id are judged. Signatures by
+  other keys are ignored, and `jku` URLs are never fetched.
+- Cards containing non-integer numbers are refused, because their canonical
+  form differs between JSON libraries. A2A's rule about dropping
+  default-valued fields is still being clarified upstream; this
+  implementation never emits empty optional fields, and on verification
+  also accepts a card to which empty arrays, objects or nulls were added.
+- Tested against the canonicalization example in the A2A specification and
+  the Ed25519 JWS vector of RFC 8037; not yet run against the A2A
+  conformance kit.
