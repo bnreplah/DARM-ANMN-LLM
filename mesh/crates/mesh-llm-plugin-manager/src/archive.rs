@@ -358,10 +358,22 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> Result<()> {
         .with_context(|| format!("open plugin archive {}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .with_context(|| format!("read plugin zip archive {}", archive_path.display()))?;
+    // Reject archives whose central directory and local headers disagree
+    // (names, sizes, duplicates): the archive-cloaking class of
+    // CVE-2026-115905. zip leaves this check off by default.
+    archive.validate_header_consistency().with_context(|| {
+        format!(
+            "plugin zip archive {} is inconsistent",
+            archive_path.display()
+        )
+    })?;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let Some(enclosed) = file.enclosed_name() else {
-            bail!("zip archive contains unsafe path: {}", file.name());
+            bail!(
+                "zip archive contains unsafe path: {}",
+                String::from_utf8_lossy(file.name_raw())
+            );
         };
         let output_path = destination.join(enclosed);
         if file.is_dir() {
@@ -457,6 +469,64 @@ mod tests {
         InstalledPluginRestartScope, InstalledPluginSettingSchema, InstalledPluginValueKind,
         InstalledPluginValueSchema, InstalledPluginVisibility,
     };
+
+    fn write_zip(archive_path: &Path, files: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(fs::File::create(archive_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in files {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(body).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn zip_with_consistent_headers_extracts() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("demo.zip");
+        write_zip(
+            &archive_path,
+            &[("plugin.toml", b"name = \"demo\""), ("bin/demo", b"x")],
+        );
+        let out = temp.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        extract_zip(&archive_path, &out).expect("consistent archive extracts");
+        assert_eq!(fs::read(out.join("bin/demo")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn zip_whose_local_and_central_names_differ_is_rejected() {
+        // Archive cloaking (CVE-2026-115905): the central directory, which
+        // listings and scanners read, names one file while the local header
+        // in front of the data names another. Same-length rename so offsets
+        // stay valid.
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("cloaked.zip");
+        write_zip(
+            &archive_path,
+            &[("readme.txt", b"hello"), ("bin/demo", b"x")],
+        );
+        let mut bytes = fs::read(&archive_path).unwrap();
+        let local = bytes
+            .windows(4)
+            .position(|w| w == b"PK\x03\x04")
+            .expect("first local header");
+        let name = local + 30;
+        assert_eq!(&bytes[name..name + 10], b"readme.txt");
+        bytes[name..name + 10].copy_from_slice(b"evil.batch");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let out = temp.path().join("out");
+        fs::create_dir_all(&out).unwrap();
+        let err = extract_zip(&archive_path, &out).expect_err("cloaked archive must be refused");
+        assert!(format!("{err:#}").contains("inconsistent"), "{err:#}");
+        assert!(
+            fs::read_dir(&out).unwrap().next().is_none(),
+            "nothing extracted"
+        );
+    }
 
     fn write_tar_gz(archive_path: &Path, plugin_name: &str, files: &[(&str, &[u8])]) -> Result<()> {
         let archive_file = fs::File::create(archive_path)?;
