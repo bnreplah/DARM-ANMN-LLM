@@ -561,6 +561,10 @@ fn extract_zip_archive(archive: &Path, extracted: &Path) -> Result<()> {
         .with_context(|| format!("Failed to open {}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(file)
         .with_context(|| format!("Failed to read ZIP archive {}", archive.display()))?;
+    // Reject archives whose central directory and local headers disagree
+    // (CVE-2026-115905); zip leaves this check off by default.
+    zip.validate_header_consistency()
+        .with_context(|| format!("ZIP archive {} is inconsistent", archive.display()))?;
 
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index)?;
