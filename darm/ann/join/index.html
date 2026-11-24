@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join DARM-ANN: contribute compute from your devices</title>
+<meta name="description" content="DARM-ANN is a secure, signed, distributed memory and compute network. Create your own identity key, join a cluster and share compute from a phone, laptop, edge box or server.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="Join DARM-ANN">
+<meta property="og:type" content="website">
+<meta property="og:description" content="Create your own keys and share compute with a DARM-ANN cluster.">
+<link rel="icon" href="../companion/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="join.css">
+</head>
+<body>
+<header>
+  <h1>DARM-ANN <span>join the network</span></h1>
+  <nav><a href="../">Node monitor</a><a href="../companion/">Phone app</a><a href="https://github.com/bnreplah/DARM-ANMN-LLM">Source</a></nav>
+</header>
+<main>
+  <section>
+    <h2>What this is</h2>
+    <p>DARM-ANN is a network of AI nodes that share <strong>signed memory</strong> and <strong>pooled compute</strong>. Every node has its own cryptographic identity. Every memory, vote, ledger entry and compute receipt is signed by the node that made it, so anything that happens on the network can be traced to a key and audited by anyone, without trusting a central server.</p>
+    <p>Compute is exchanged through <strong>closed-loop credits</strong>: they are granted by validator governance and move only when a coordinator settles finished work. They cannot be transferred freely or redeemed outside the network.</p>
+  </section>
+
+  <section>
+    <h2>How your device takes part</h2>
+    <div class="cards">
+      <article>
+        <h3>Phone or tablet</h3>
+        <p>Install the companion web app. It makes a device key that never leaves the phone, verifies the ledger, shows your credits and signs audit receipts. No app store and no developer account.</p>
+        <p><a class="button" href="../companion/">Open the phone app</a></p>
+      </article>
+      <article>
+        <h3>Laptop, desktop, edge box or server</h3>
+        <p>Run a node that advertises your CPU or GPU to the compute pool and serves work. The starter kit below creates your key and sets the node up for this cluster.</p>
+        <p><a class="button" href="#kit">Build my starter kit</a></p>
+      </article>
+    </div>
+    <p class="note">Honest limits: browsers and phones can verify and audit, but only a full node runs model inference. A phone cannot contribute while it is locked or the page is closed.</p>
+  </section>
+
+  <section id="kit">
+    <h2>Starter kit</h2>
+    <ol class="steps">
+      <li><strong>Find your cluster.</strong> Enter the archive URL your operator gave you. This page reads it; it sends nothing.</li>
+      <li><strong>Check the genesis hash</strong> against the one your operator published. If it differs, stop: that is not your cluster.</li>
+      <li><strong>Choose what to share</strong> and download two files.</li>
+      <li><strong>Run the script.</strong> It creates your identity key on your machine (the key is never uploaded), prints your node id, and starts the node.</li>
+    </ol>
+
+    <form id="lookup" autocomplete="off">
+      <label>Archive URL <input id="archive" type="url" required placeholder="https://archive.example.org"></label>
+      <button type="submit">Look up cluster</button>
+    </form>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <div id="network" hidden>
+      <dl>
+        <dt>Cluster</dt><dd id="n-chain"></dd>
+        <dt>Genesis hash</dt><dd><code id="n-genesis"></code></dd>
+        <dt>Validators</dt><dd id="n-validators"></dd>
+        <dt>Ledger height</dt><dd id="n-height"></dd>
+      </dl>
+      <form id="choices">
+        <label>Device type
+          <select id="form-factor"></select>
+        </label>
+        <fieldset><legend>Workloads to serve</legend><div id="workloads"></div></fieldset>
+        <label>Share of the device to offer: <output id="share-out">50</output>%
+          <input id="share" type="range" min="1" max="100" value="50">
+        </label>
+        <label class="row"><input id="charging" type="checkbox" checked> Only contribute while charging (recommended for battery devices)</label>
+        <p><button type="submit">Download starter kit</button></p>
+      </form>
+      <div id="downloads" hidden>
+        <p>Put both files in one folder, then:</p>
+        <pre><code>chmod +x join.sh
+./join.sh</code></pre>
+        <p>You also need <code>mesh-llm</code> and <code>darm-node</code> built from the <a href="https://github.com/bnreplah/DARM-ANMN-LLM/blob/main/darm/docs/QUICKSTART.md">quickstart</a>. Ask your operator for a mesh join token, or leave it empty to run standalone first.</p>
+        <p class="note">The files contain only public cluster settings. Your key is created locally by <code>darm-node keygen</code> and stays in <code>~/.mesh-llm/darm/identity.key</code>. Back it up: a lost key means a lost identity and its credits.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>After you join</h2>
+    <ul>
+      <li>Your <strong>node id</strong> is your public key. Send it to the operator to receive a credit grant or to be considered for the validator set.</li>
+      <li>Watch your node and the whole network on the <a href="../">node monitor</a>.</li>
+      <li>Credits arrive through ledger entries (governance grants and compute settlements). Nothing on this page, and no archive, can create them on its own.</li>
+      <li>Use only networks you are authorized to join. A node that signs bad data loses reputation and can be voted out.</li>
+    </ul>
+  </section>
+</main>
+<footer><p>DARM-ANN by Cybopsec. MIT license.</p></footer>
+<script type="module" src="join.js"></script>
+</body>
+</html>

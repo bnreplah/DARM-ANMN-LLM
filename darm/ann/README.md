@@ -39,6 +39,7 @@ to the protocol crates in [`../crates`](../crates).
 | [`deploy/`](deploy/) | Hardened Dockerfile and compose stack, Kubernetes manifests (restricted PSA, default-deny NetworkPolicy), systemd unit. |
 | [`monitor/`](monitor/) | Node monitor: a static, read-only page that draws the network's nodes and block activity as a live graph. Deploys to GitHub Pages. |
 | [`companion/`](companion/) | Phone companion: an installable web app (iOS and Android, no developer keys) with its own signed device identity, a locally verified credit wallet and a ledger-audit worker. Deploys to GitHub Pages under `/companion/`. |
+| [`join/`](join/) | Onboarding page: explains DARM-ANN and generates a starter kit (cluster settings plus a join script that creates your identity key locally) for laptops, edge boxes and servers. Deploys to GitHub Pages under `/join/`. |
 | [`scripts/`](scripts/) | Token generation and checkpoint anchoring helpers. |
 
 The original Python proof of concept stays on the
