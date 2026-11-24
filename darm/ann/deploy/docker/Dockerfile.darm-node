@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+# DARM-ANN archive/anchor node.
+#
+# Build (from the DARM-ANMN-LLM repository root, so the darm crates are in context):
+#   docker build -f darm/ann/deploy/docker/Dockerfile.darm-node -t darm-node:local .
+#
+# Supply-chain notes: the DARM protocol crates are fetched from
+# darm/crates in this repository and locked by darm/ann/server/Cargo.lock
+# (`--locked`). For production, also pin the base images
+# below by digest (`image@sha256:...`).
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+# The server is a path dependency on darm/crates; darm-core inherits its
+# dependency versions from the root manifest, so that is copied too.
+COPY Cargo.toml ./Cargo.toml
+COPY darm/crates/ ./darm/crates/
+COPY darm/ann/server/ ./darm/ann/server/
+WORKDIR /src/darm/ann/server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/darm/ann/server/target \
+    cargo build --release --locked -p darm-node && \
+    install -Dm755 target/release/darm-node /out/darm-node
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 darm \
+    && useradd --system --uid 10001 --gid darm --home-dir /var/lib/darm --shell /usr/sbin/nologin darm \
+    && install -d -o darm -g darm -m 0700 /var/lib/darm
+COPY --from=build /out/darm-node /usr/local/bin/darm-node
+USER 10001:10001
+ENV DARM_NODE_DATA_DIR=/var/lib/darm \
+    DARM_NODE_LISTEN=0.0.0.0:8088
+VOLUME ["/var/lib/darm"]
+EXPOSE 8088
+HEALTHCHECK --interval=30s --timeout=3s CMD curl -fsS http://127.0.0.1:8088/healthz || exit 1
+ENTRYPOINT ["darm-node"]
+CMD ["serve"]

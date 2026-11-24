@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/darm-node"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+repository = "https://github.com/bnreplah/DARM-ANMN-LLM"
+
+[workspace.dependencies]
+# The protocol crates live in this repository (darm/crates). This is a separate
+# Cargo workspace, like darm/compat-tests, so the archive server builds and
+# locks independently of the mesh-llm workspace.
+darm-core = { path = "../../crates/darm-core" }
+darm-memory = { path = "../../crates/darm-memory" }

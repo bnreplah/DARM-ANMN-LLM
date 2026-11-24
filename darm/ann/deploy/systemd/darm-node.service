@@ -1,0 +1,48 @@
+# Hardened systemd unit for a bare-metal darm-node.
+#   install -m755 darm-node /usr/local/bin/
+#   install -d -m700 /etc/darm && install -m600 write_token /etc/darm/write_token
+#   cp darm-node.env /etc/darm/darm-node.env   # DARM_CHAIN_NAME, DARM_VALIDATORS
+#   systemctl enable --now darm-node
+[Unit]
+Description=DARM-ANN archive and anchor node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=darm
+StateDirectoryMode=0700
+EnvironmentFile=/etc/darm/darm-node.env
+Environment=DARM_NODE_DATA_DIR=/var/lib/darm
+Environment=DARM_NODE_LISTEN=127.0.0.1:8088
+LoadCredential=write_token:/etc/darm/write_token
+ExecStart=/usr/local/bin/darm-node serve --write-token-file ${CREDENTIALS_DIRECTORY}/write_token
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

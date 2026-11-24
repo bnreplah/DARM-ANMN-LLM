@@ -1,0 +1,23 @@
+{
+  "name": "darm-anchor-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DARM-ANN Ethereum anchor contract and tests (in-process EVM, no network)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "solcjs --bin --abi --optimize --base-path . -o out src/DarmAnchor.sol",
+    "test": "node --test test/DarmAnchor.test.js"
+  },
+  "devDependencies": {
+    "@ethereumjs/common": "4.4.0",
+    "@ethereumjs/tx": "5.4.0",
+    "@ethereumjs/util": "9.1.0",
+    "@ethereumjs/vm": "8.1.1",
+    "ethers": "6.17.0",
+    "solc": "^0.8.38"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}
