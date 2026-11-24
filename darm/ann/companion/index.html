@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DARM-ANN companion</title>
+<meta name="description" content="Pair your phone with a DARM-ANN cluster: a device key of your own, a locally verified credit wallet and a ledger-audit worker.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="DARM">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon.svg">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header><h1>DARM-ANN <span>companion</span></h1></header>
+<main>
+  <p id="banner" class="banner" role="status" hidden></p>
+
+  <section id="pair" hidden>
+    <h2>Pair with a cluster</h2>
+    <form id="pair-form" autocomplete="off">
+      <label>Archive URL <input id="url" type="url" required placeholder="https://archive.example.org"></label>
+      <label>Read token <small>(only if the archive requires one)</small> <input id="read-token" type="password"></label>
+      <label>Enroll token <small>(only if the operator gave you one)</small> <input id="enroll-token" type="password"></label>
+      <label>Device name <input id="label" maxlength="64" placeholder="my phone"></label>
+      <button type="submit">Look up cluster</button>
+    </form>
+    <div id="confirm" hidden>
+      <p>Compare this genesis hash with the one your operator published. If it differs, this is not your cluster.</p>
+      <p><code id="genesis"></code></p>
+      <p id="chain-summary"></p>
+      <button id="accept" type="button">It matches, pair this device</button>
+    </div>
+  </section>
+
+  <section id="home" hidden>
+    <h2>This device</h2>
+    <dl>
+      <dt>Device ID</dt><dd><code id="node-id"></code></dd>
+      <dt>Cluster</dt><dd id="chain"></dd>
+      <dt>Verified height</dt><dd id="height"></dd>
+    </dl>
+    <h2>Credits</h2>
+    <p class="big" id="balance">0</p>
+    <dl>
+      <dt>Granted</dt><dd id="granted"></dd>
+      <dt>Earned from compute</dt><dd id="in"></dd>
+      <dt>Spent</dt><dd id="out"></dd>
+    </dl>
+    <p id="mismatch" class="banner warn" hidden></p>
+    <button id="work" type="button">Verify the ledger now</button>
+    <label class="row"><input id="auto" type="checkbox"> Verify every minute while this page is open</label>
+    <h2>Activity</h2>
+    <ul id="activity"></ul>
+    <h2>Audit trail</h2>
+    <p><button id="export" type="button">Export signed receipts</button></p>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

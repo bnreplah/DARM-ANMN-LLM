@@ -1,0 +1,52 @@
+# DARM-ANN local stack: archive node + local Ethereum devnet for anchoring.
+#
+#   (from darm/ann)
+#   cp deploy/docker/.env.example deploy/docker/.env    # then fill it in
+#   ./scripts/gen-token.sh deploy/docker/secrets/write_token
+#   docker compose -f deploy/docker/docker-compose.yml up --build
+#
+# Mesh nodes (GPU hosts) run DARM-ANN-LLM's `mesh-llm` natively or from your
+# own image and push finalized blocks/memories to the archive. See README.
+
+name: darm-ann
+
+services:
+  darm-node:
+    build:
+      context: ../../../..
+      dockerfile: darm/ann/deploy/docker/Dockerfile.darm-node
+    env_file: .env
+    environment:
+      DARM_NODE_WRITE_TOKEN_FILE: /run/secrets/write_token
+    secrets: [write_token]
+    volumes:
+      - darm-data:/var/lib/darm
+    # Loopback only: put a TLS proxy in front before exposing it.
+    ports:
+      - "127.0.0.1:8088:8088"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [darm]
+
+  # Local Ethereum devnet for exercising DarmAnchor. Never use its
+  # well-known dev keys on a real network.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337"]
+    ports:
+      - "127.0.0.1:8545:8545"
+    profiles: [anchor]
+    networks: [darm]
+
+volumes:
+  darm-data:
+
+secrets:
+  write_token:
+    file: ./secrets/write_token
+
+networks:
+  darm:

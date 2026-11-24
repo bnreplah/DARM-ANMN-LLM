@@ -1,0 +1,84 @@
+name: DARM-ANN node monitor and companion (GitHub Pages)
+
+# Publishes the node monitor at the site root and the phone companion (an
+# installable web app) under /companion/.
+#
+# One-time setup: Settings -> Pages -> Build and deployment -> Source:
+# "GitHub Actions". Optionally set the repository variable
+# DARM_MONITOR_NODES to a comma-separated list of archive URLs. The monitor
+# opens pointed at all of them and the companion's pairing form is prefilled
+# with the first. Each archive must list this site's origin in
+# DARM_NODE_CORS_ORIGINS. See darm/ann/monitor/README.md and
+# darm/ann/companion/README.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - darm/ann/monitor/**
+      - darm/ann/companion/**
+      - .github/workflows/darm-ann-pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node --test darm/ann/monitor/model.test.js
+      - name: companion tests
+        working-directory: darm/ann/companion
+        run: node --test test/*.test.js
+      - name: assemble site
+        env:
+          # Passed through the environment, never interpolated into the
+          # script, so a variable's content cannot become shell code.
+          DARM_MONITOR_NODES: ${{ vars.DARM_MONITOR_NODES }}
+        run: |
+          set -euo pipefail
+          mkdir -p _site/companion
+          cd darm/ann
+          cp monitor/index.html monitor/monitor.css monitor/monitor.js monitor/model.js ../../_site/
+          cp -r companion/index.html companion/app.css companion/app.js companion/sw.js \
+            companion/manifest.webmanifest companion/icons companion/src companion/vendor ../../_site/companion/
+          cd ../..
+          jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
+            '{nodes: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}' \
+            > _site/config.json
+          jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
+            '{archive: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | (.[0] // ""))}' \
+            > _site/companion/config.json
+          cat _site/config.json _site/companion/config.json
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: _site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

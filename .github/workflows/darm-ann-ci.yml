@@ -1,0 +1,97 @@
+name: DARM-ANN extras CI
+
+# Covers darm/ann: the archive node and device gateway, anchor contracts,
+# node monitor and phone companion.
+
+on:
+  push:
+    branches: [main]
+    paths: ['darm/**', '.github/workflows/darm-ann-*.yml']
+  pull_request:
+    paths: ['darm/**', '.github/workflows/darm-ann-*.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: darm-ann-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
+jobs:
+  server:
+    name: darm-node (fmt, clippy, test, vectors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: darm/ann/server
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+        with:
+          workspaces: darm/ann/server
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: test vectors are current
+        run: cargo run --locked -q -- vectors | diff - ../spec/test-vectors.json
+
+  contracts:
+    name: DarmAnchor (compile, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: darm/ann/contracts
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  web:
+    name: monitor and companion (JS tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node --test darm/ann/monitor/model.test.js
+      - run: node --check darm/ann/monitor/monitor.js
+      - name: companion tests (against the Rust test vectors)
+        working-directory: darm/ann/companion
+        run: |
+          node --test test/*.test.js
+          node --check app.js
+          node --check sw.js
+      - name: vendored hash code is unmodified
+        working-directory: darm/ann/companion/vendor/noble-hashes
+        run: sha256sum --check --strict SHA256SUMS
+
+  scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: bash -n darm/ann/scripts/*.sh
+      - run: shellcheck darm/ann/scripts/*.sh

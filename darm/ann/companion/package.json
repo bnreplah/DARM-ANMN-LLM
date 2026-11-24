@@ -1,0 +1,11 @@
+{
+  "name": "darm-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DARM-ANN companion app: an installable web app that gives a phone its own signed identity, a verified credit wallet and a ledger-verifier worker.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

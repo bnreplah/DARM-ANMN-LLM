@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DARM-ANN node monitor</title>
+<meta name="description" content="Read-only live view of a DARM-ANN network: validators, proposers and memory authors drawn as a graph that pulses as blocks finalize.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="DARM-ANN node monitor">
+<meta property="og:type" content="website">
+<meta property="og:description" content="Read-only live view of a DARM-ANN network.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication","name":"DARM-ANN node monitor","applicationCategory":"DeveloperApplication","operatingSystem":"Any","description":"Read-only live view of a DARM-ANN distributed memory network: nodes, roles and block activity.","isAccessibleForFree":true,"creator":{"@type":"Organization","name":"Cybopsec"}}
+</script>
+<link rel="stylesheet" href="monitor.css">
+</head>
+<body>
+<canvas id="graph" aria-hidden="true"></canvas>
+
+<header>
+  <h1>DARM-ANN <span>node monitor</span></h1>
+  <p id="mode" class="badge">read-only edge</p>
+  <p id="simulated" class="badge warn" hidden>simulated data, not your network</p>
+</header>
+
+<main>
+  <section id="status" aria-live="polite">
+    <dl>
+      <div><dt>chain</dt><dd id="s-chain">-</dd></div>
+      <div><dt>height</dt><dd id="s-height">-</dd></div>
+      <div><dt>head</dt><dd id="s-head">-</dd></div>
+      <div><dt>nodes</dt><dd id="s-nodes">0</dd></div>
+      <div><dt>validators</dt><dd id="s-validators">0</dd></div>
+      <div><dt>quorum</dt><dd id="s-quorum">-</dd></div>
+      <div><dt>archives</dt><dd id="s-sources">0 / 0</dd></div>
+    </dl>
+    <p id="alone" hidden>
+      No DARM-ANN node is reachable, so this monitor is the only node shown.
+      It is a read-only edge: it holds no key, signs nothing and cannot write.
+      Add an archive node below to see the network.
+    </p>
+  </section>
+
+  <section id="sources">
+    <h2>Archives</h2>
+    <ul id="source-list"></ul>
+    <form id="add-source" autocomplete="off">
+      <label for="source-url">Archive URL</label>
+      <input id="source-url" type="url" inputmode="url" placeholder="https://archive.example" maxlength="300" required>
+      <label for="read-token">Read token (optional, kept in memory only)</label>
+      <input id="read-token" type="password" maxlength="256" autocomplete="off">
+      <button type="submit">Add</button>
+    </form>
+    <p id="form-error" class="error" role="alert" hidden></p>
+    <button id="toggle-sim" type="button" aria-pressed="false">Preview with simulated nodes</button>
+  </section>
+
+  <section id="nodes">
+    <h2>Nodes</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th scope="col">node</th><th scope="col">role</th><th scope="col">wt</th><th scope="col">prop</th><th scope="col">att</th><th scope="col">auth</th><th scope="col">last</th></tr>
+        </thead>
+        <tbody id="node-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span class="key k-observer">monitor</span>
+  <span class="key k-archive">archive</span>
+  <span class="key k-validator">validator</span>
+  <span class="key k-mesh">node</span>
+  <span class="key k-pulse">vote / entry</span>
+</footer>
+
+<script src="model.js"></script>
+<script src="monitor.js"></script>
+</body>
+</html>

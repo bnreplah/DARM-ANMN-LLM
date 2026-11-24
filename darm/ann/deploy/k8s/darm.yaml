@@ -1,0 +1,223 @@
+# DARM-ANN on Kubernetes: archive node + DARM-ANN-LLM mesh nodes.
+#
+# Before applying:
+#   kubectl create namespace darm --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n darm create secret generic darm-node-write-token \
+#     --from-file=token=<(./scripts/gen-token.sh -)
+#   edit the ConfigMap below (chain name, validators) and the images.
+#   kubectl apply -f deploy/k8s/darm.yaml
+#
+# Security posture: restricted Pod Security Standard, non-root, read-only root
+# filesystem, all capabilities dropped, default-deny NetworkPolicy with
+# explicit allows, no service account token mounted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: darm
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: darm-chain
+  namespace: darm
+data:
+  DARM_CHAIN_NAME: "my-darm-mesh"
+  # Comma-separated Ed25519 node ids of the validators.
+  DARM_VALIDATORS: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: darm
+  namespace: darm
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: darm-node
+  namespace: darm
+spec:
+  serviceName: darm-node
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: darm-node}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: darm-node, darm.io/role: archive}
+    spec:
+      serviceAccountName: darm
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: darm-node
+          image: darm-node:local # replace with your registry image, pinned by digest
+          args: ["serve"]
+          envFrom:
+            - configMapRef: {name: darm-chain}
+          env:
+            - {name: DARM_NODE_LISTEN, value: "0.0.0.0:8088"}
+            - {name: DARM_NODE_DATA_DIR, value: /var/lib/darm}
+            - {name: DARM_NODE_WRITE_TOKEN_FILE, value: /run/secrets/darm/token}
+          ports:
+            - {name: http, containerPort: 8088}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/darm}
+            - {name: write-token, mountPath: /run/secrets/darm, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: write-token
+          secret: {secretName: darm-node-write-token, defaultMode: 0400}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 10Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: darm-node
+  namespace: darm
+spec:
+  selector: {app.kubernetes.io/name: darm-node}
+  ports:
+    - {name: http, port: 8088, targetPort: http}
+---
+# DARM-ANN-LLM mesh nodes. Use an image built from DARM-ANMN-LLM (mesh-llm
+# with the darm plugin). GPU scheduling (nodeSelector/resources) is
+# cluster-specific and left to you. The replicator never scales this
+# automatically: operators act on passed `replicate` proposals
+# (`darm-node replication-plan`).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: darm-mesh-node
+  namespace: darm
+spec:
+  serviceName: darm-mesh-node
+  replicas: 3
+  selector:
+    matchLabels: {app.kubernetes.io/name: darm-mesh-node}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: darm-mesh-node, darm.io/role: mesh}
+    spec:
+      serviceAccountName: darm
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mesh-llm
+          image: darm-ann-llm:local # replace: mesh-llm built from DARM-ANMN-LLM, pinned by digest
+          args: ["serve", "--auto", "--headless"]
+          envFrom:
+            - configMapRef: {name: darm-chain}
+          env:
+            - {name: HOME, value: /var/lib/mesh}
+            - {name: DARM_DATA_DIR, value: /var/lib/mesh/darm}
+            - {name: DARM_SHARE, value: "1"}
+          ports:
+            - {name: openai, containerPort: 9337}
+            - {name: console, containerPort: 3131}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/mesh}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata: {name: state}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 100Gi}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: darm
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Archive: reachable only from mesh nodes in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: darm-node-ingress
+  namespace: darm
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: darm-node}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {darm.io/role: mesh}
+      ports:
+        - {port: 8088, protocol: TCP}
+---
+# Mesh nodes: talk to each other, the archive, DNS, and the internet for mesh
+# peers and model downloads. Tighten the internet rule for private meshes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: darm-mesh-node
+  namespace: darm
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: darm-mesh-node}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {darm.io/role: mesh}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {darm.io/role: mesh}
+        - podSelector:
+            matchLabels: {darm.io/role: archive}
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
