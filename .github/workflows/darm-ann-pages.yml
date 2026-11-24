@@ -17,6 +17,7 @@ on:
     paths:
       - darm/ann/monitor/**
       - darm/ann/companion/**
+      - darm/ann/join/**
       - .github/workflows/darm-ann-pages.yml
   workflow_dispatch:
 
@@ -40,6 +41,7 @@ jobs:
         with:
           node-version: 22
       - run: node --test darm/ann/monitor/model.test.js
+      - run: node --test darm/ann/join/kit.test.js
       - name: companion tests
         working-directory: darm/ann/companion
         run: node --test test/*.test.js
@@ -50,11 +52,12 @@ jobs:
           DARM_MONITOR_NODES: ${{ vars.DARM_MONITOR_NODES }}
         run: |
           set -euo pipefail
-          mkdir -p _site/companion
+          mkdir -p _site/companion _site/join
           cd darm/ann
           cp monitor/index.html monitor/monitor.css monitor/monitor.js monitor/model.js ../../_site/
           cp -r companion/index.html companion/app.css companion/app.js companion/sw.js \
             companion/manifest.webmanifest companion/icons companion/src companion/vendor ../../_site/companion/
+          cp join/index.html join/join.css join/join.js join/kit.js ../../_site/join/
           cd ../..
           jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
             '{nodes: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}' \
@@ -62,6 +65,7 @@ jobs:
           jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
             '{archive: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | (.[0] // ""))}' \
             > _site/companion/config.json
+          cp _site/companion/config.json _site/join/config.json
           cat _site/config.json _site/companion/config.json
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0

@@ -88,3 +88,4 @@ footer {
   main { top: auto; left: 0; width: 100%; height: 46vh; bottom: 30px; }
   .scroll { max-height: 22vh; }
 }
+.badge a { color: inherit; }
