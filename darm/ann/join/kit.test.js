@@ -51,3 +51,55 @@ test('join script is valid bash', () => {
   writeFileSync(join(dir, 'join.sh'), joinScript(validateInfo(info)));
   execFileSync('bash', ['-n', join(dir, 'join.sh')]);
 });
+
+import { PROFILES, guessFormFactor, isMobile, validateChoices } from './kit.js';
+import { loadSettings, saveSettings, candidateArchives } from './settings.js';
+import { connect } from './net.js';
+
+test('profiles produce valid choices and device guesses are sane', () => {
+  for (const p of Object.values(PROFILES)) {
+    assert.doesNotThrow(() => validateChoices({ formFactor: 'laptop', workloads: ['inference'], sharePct: p.sharePct, requireCharging: p.requireCharging }));
+  }
+  assert.equal(guessFormFactor('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)'), 'phone');
+  assert.equal(guessFormFactor('Mozilla/5.0 (Linux; Android 14; Pixel) Mobile'), 'phone');
+  assert.equal(guessFormFactor('Mozilla/5.0 (iPad)'), 'tablet');
+  assert.equal(guessFormFactor('Mozilla/5.0 (X11; Linux x86_64)'), 'laptop');
+  assert.equal(isMobile('Mozilla/5.0 (iPhone)'), true);
+});
+
+const memStore = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) }; };
+
+test('tokens stay in the session unless the user opts to remember them', () => {
+  const local = memStore(), session = memStore();
+  saveSettings({ archive: 'https://a.example.org', readToken: 'secret', remember: false }, local, session);
+  assert.equal(local.getItem('darm.settings.v1'), null);
+  assert.equal(loadSettings(local, session).readToken, 'secret');
+  saveSettings({ archive: 'https://a.example.org', readToken: 'secret', remember: true }, local, session);
+  assert.equal(session.getItem('darm.settings.v1'), null);
+  assert.equal(loadSettings(local, session).remember, true);
+  const bad = { getItem: () => '{not json', setItem() {}, removeItem() {} };
+  assert.equal(loadSettings(bad, bad).archive, '');
+});
+
+test('the user archive goes first, then the site pivot list without duplicates', () => {
+  assert.deepEqual(candidateArchives({ archive: 'https://mine.example' }, { nodes: ['https://p1.example', 'https://mine.example'], archive: 'https://p1.example' }),
+    ['https://mine.example', 'https://p1.example']);
+  assert.deepEqual(candidateArchives({ archive: '' }, {}), []);
+});
+
+test('connect fails over across the pivot list and reports why each failed', async () => {
+  const good = { ok: true, status: 200, json: async () => info };
+  const calls = [];
+  const fetchFn = async (url, opts) => {
+    calls.push([url, opts.headers.authorization]);
+    if (url.startsWith('https://down.example')) throw new TypeError('network');
+    if (url.startsWith('https://locked.example')) return { ok: false, status: 401 };
+    return good;
+  };
+  const r = await connect(['https://down.example', 'https://locked.example', 'http://bad.example', 'https://up.example'], { readToken: 't', fetchFn });
+  assert.equal(r.archive, 'https://up.example');
+  assert.equal(r.tried, 4);
+  assert.deepEqual(r.failures.map((f) => f.reason), ['network', 'needs a read token', 'The archive must use https (http only for localhost).']);
+  assert.equal(calls[0][1], 'Bearer t');
+  await assert.rejects(() => connect(['https://down.example'], { fetchFn }), (e) => e.failures.length === 1);
+});

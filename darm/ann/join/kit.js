@@ -120,3 +120,21 @@ fi
 exec mesh-llm serve --auto
 `;
 }
+
+/** One-tap contribution levels, so most people never see the raw knobs. */
+export const PROFILES = {
+  light: { label: 'Light', detail: '25% of the device, only while charging', sharePct: 25, requireCharging: true },
+  balanced: { label: 'Balanced', detail: '50% of the device, only while charging', sharePct: 50, requireCharging: true },
+  full: { label: 'Full', detail: '100% of the device, any time (best for always-on machines)', sharePct: 100, requireCharging: false },
+};
+export const DEFAULT_WORKLOADS = ['inference', 'embedding', 'verification'];
+
+/** Guess a sensible device type; the user can change it under Customize. */
+export function guessFormFactor(userAgent = '') {
+  if (/iPad|Tablet/i.test(userAgent)) return 'tablet';
+  if (/iPhone|Android.*Mobile|Mobile/i.test(userAgent)) return 'phone';
+  if (/Raspberry|armv|aarch64/i.test(userAgent)) return 'edge';
+  return 'laptop';
+}
+
+export const isMobile = (userAgent = '') => ['phone', 'tablet'].includes(guessFormFactor(userAgent));
