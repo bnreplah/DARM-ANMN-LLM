@@ -103,3 +103,46 @@ test('connect fails over across the pivot list and reports why each failed', asy
   assert.equal(calls[0][1], 'Bearer t');
   await assert.rejects(() => connect(['https://down.example'], { fetchFn }), (e) => e.failures.length === 1);
 });
+
+import { readRegistry, onChainArchives } from './chain.js';
+
+const word = (n) => BigInt(n).toString(16).padStart(64, '0');
+const strWord = (s) => { const h = Buffer.from(s).toString('hex'); return word(s.length) + h.padEnd(Math.ceil(h.length / 64) * 64, '0'); };
+function reply(admin, genesis, urls) {
+  const parts = urls.map(strWord);
+  let off = urls.length * 32; const offsets = [];
+  for (const p of parts) { offsets.push(word(off)); off += p.length / 2; }
+  return '0x' + admin.replace('0x', '').padStart(64, '0') + genesis + word(1) + word(1700000000) + word(160) + word(urls.length) + offsets.join('') + parts.join('');
+}
+const ADMIN = '0x' + 'ab'.repeat(20);
+const entry = { name: 'sepolia', rpc: 'https://rpc.example', registry: '0x' + 'cd'.repeat(20), chainId: '0x' + '11'.repeat(32), admin: ADMIN };
+const rpc = (body) => async () => ({ ok: true, json: async () => ({ result: body }) });
+
+test('on-chain list is used only when the registered admin and genesis match the pins', async () => {
+  const good = reply(ADMIN, '22'.repeat(32), ['https://a.example.org']);
+  assert.deepEqual((await readRegistry(entry, { fetchFn: rpc(good) })).urls, ['https://a.example.org']);
+  // A squatter registered the same chain id first: wrong admin, ignored.
+  assert.equal(await readRegistry(entry, { fetchFn: rpc(reply('0x' + 'ee'.repeat(20), '22'.repeat(32), ['https://evil.example'])) }), null);
+  // Pinned genesis must match too.
+  assert.equal(await readRegistry({ ...entry, genesis: '33'.repeat(32) }, { fetchFn: rpc(good) }), null);
+  assert.ok(await readRegistry({ ...entry, genesis: '22'.repeat(32) }, { fetchFn: rpc(good) }));
+});
+
+test('malformed or hostile registry replies and configs are ignored, not trusted', async () => {
+  for (const bad of ['0x', '0x1234', '0x' + 'ff'.repeat(300), reply(ADMIN, '22'.repeat(32), ['https://a']).replace(/.{64}$/, 'ff'.repeat(32))])
+    assert.equal(await readRegistry(entry, { fetchFn: rpc(bad) }), null);
+  assert.equal(await readRegistry({ ...entry, rpc: 'http://insecure.example' }), null);
+  assert.equal(await readRegistry({ ...entry, admin: 'nope' }), null);
+  assert.equal(await readRegistry(entry, { fetchFn: async () => { throw new TypeError('down'); } }), null);
+});
+
+test('an archive found on-chain must still match the registry genesis and use https', async () => {
+  const fetchFn = async () => ({ ok: true, status: 200, json: async () => info });
+  const match = await onChainArchives([entry], { fetchFn: rpc(reply(ADMIN, 'a'.repeat(64), ['http://plain.example', 'https://up.example'])) });
+  const r = await connect(match, { fetchFn });
+  assert.equal(r.archive, 'https://up.example');
+  assert.equal(r.via, 'sepolia');
+  assert.equal(r.failures[0].reason, 'The archive must use https (http only for localhost).');
+  const wrong = await onChainArchives([entry], { fetchFn: rpc(reply(ADMIN, 'c'.repeat(64), ['https://up.example'])) });
+  await assert.rejects(() => connect(wrong, { fetchFn }), (e) => e.failures[0].reason === 'genesis does not match the registry');
+});

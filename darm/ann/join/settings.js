@@ -44,10 +44,11 @@ export function clearSettings(local, session) {
 }
 
 /** Archives to try, in order: the user's own first, then the site's pivot list. */
-export function candidateArchives(settings, config) {
+export function candidateArchives(settings, config, onChain = []) {
   const list = [];
   if (settings.archive) list.push(settings.archive);
   for (const url of config?.nodes ?? []) if (!list.includes(url)) list.push(url);
   if (config?.archive && !list.includes(config.archive)) list.push(config.archive);
+  for (const entry of onChain) if (!list.some((c) => (typeof c === 'string' ? c : c.url) === entry.url)) list.push(entry);
   return list;
 }

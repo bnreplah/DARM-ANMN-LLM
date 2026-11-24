@@ -65,3 +65,18 @@ test('a tampered entry or another chain is rejected', async () => {
   const real = vectors.credits.credit_grant.entry;
   await assert.rejects(() => verifyEntry(real, '00'.repeat(32)), /another chain/);
 });
+
+import { claimMessage, signClaim, verifyClaim } from '../src/claim.js';
+
+test('node claims bind the node to one wallet, registry and EVM chain', async () => {
+  const identity = await identityFromSeed(new Uint8Array(32).fill(9));
+  const fields = {
+    darmChain: '11'.repeat(32), node: identity.nodeId, evmChainId: 11155111,
+    registry: '0x' + 'cd'.repeat(20), wallet: '0x' + 'ab'.repeat(20),
+  };
+  const signature = await signClaim(identity, fields);
+  assert.equal(await verifyClaim(fields, signature), true);
+  for (const change of [{ wallet: '0x' + 'ac'.repeat(20) }, { registry: '0x' + 'ce'.repeat(20) }, { evmChainId: 84532 }, { darmChain: '12'.repeat(32) }])
+    assert.equal(await verifyClaim({ ...fields, ...change }, signature), false);
+  assert.throws(() => claimMessage({ ...fields, wallet: 'nope' }), RangeError);
+});

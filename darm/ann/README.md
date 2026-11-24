@@ -35,7 +35,7 @@ to the protocol crates in [`../crates`](../crates).
 | [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | Normative protocol: canonical encodings, hashing domains, memory, ledger and quorum rules, gossip messages, archive HTTP API. |
 | [`spec/test-vectors.json`](spec/test-vectors.json) | Byte-exact vectors an independent implementation must reproduce (`darm-node vectors` regenerates them). |
 | [`server/`](server/) | `darm-node`: verifying archive/anchor server (HTTP API), offline `keygen`, test vectors, operator replication planning. |
-| [`contracts/`](contracts/) | `DarmAnchor.sol`: anchors ledger checkpoints on Ethereum once >2/3 of validator accounts approve; tests run on an in-process EVM. |
+| [`contracts/`](contracts/) | `DarmAnchor` (anchors ledger checkpoints once >2/3 of validator accounts approve) and `DarmRegistry` (on-chain archive list and node claims), with a testnet deploy script; tests run on an in-process EVM. |
 | [`deploy/`](deploy/) | Hardened Dockerfile and compose stack, Kubernetes manifests (restricted PSA, default-deny NetworkPolicy), systemd unit. |
 | [`monitor/`](monitor/) | Node monitor: a static, read-only page that draws the network's nodes and block activity as a live graph. Deploys to GitHub Pages. |
 | [`companion/`](companion/) | Phone companion: an installable web app (iOS and Android, no developer keys) with its own signed device identity, a locally verified credit wallet and a ledger-audit worker. Deploys to GitHub Pages under `/companion/`. |

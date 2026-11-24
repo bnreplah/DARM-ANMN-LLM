@@ -83,6 +83,7 @@ jobs:
           node --check sw.js
       - run: node --test darm/ann/join/kit.test.js
       - run: node --check darm/ann/join/join.js
+      - run: node --check darm/ann/join/chain.js
       - name: vendored hash code is unmodified
         working-directory: darm/ann/companion/vendor/noble-hashes
         run: sha256sum --check --strict SHA256SUMS

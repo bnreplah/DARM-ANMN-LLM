@@ -1,0 +1,66 @@
+name: Deploy DARM contracts (testnet)
+
+# Manual only. Deploys DarmAnchor and DarmRegistry to a test network and
+# optionally registers a DARM network. Mainnets are not selectable.
+#
+# One-time setup: create a GitHub environment named "testnet-deploy" (add
+# required reviewers) and a secret DEPLOYER_KEY in it: a THROWAWAY key funded
+# with test ETH, never a key that holds real funds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Test network
+        type: choice
+        options: [sepolia, base-sepolia, arbitrum-sepolia]
+        required: true
+      darm_chain:
+        description: DARM chain id to register (32-byte hex, optional)
+        required: false
+      genesis:
+        description: DARM genesis hash (32-byte hex, required with darm_chain)
+        required: false
+      urls:
+        description: Comma-separated https archive URLs for the registry
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: testnet-deploy
+    defaults:
+      run:
+        working-directory: darm/ann/contracts
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: deploy
+        env:
+          DEPLOYER_KEY: ${{ secrets.DEPLOYER_KEY }}
+          # Inputs go through the environment, never into the script text.
+          NETWORK: ${{ inputs.network }}
+          DARM_CHAIN: ${{ inputs.darm_chain }}
+          GENESIS: ${{ inputs.genesis }}
+          URLS: ${{ inputs.urls }}
+        run: |
+          set -euo pipefail
+          args=(--network "$NETWORK")
+          if [ -n "$DARM_CHAIN" ]; then args+=(--darm-chain "$DARM_CHAIN" --genesis "$GENESIS" --urls "$URLS"); fi
+          node scripts/deploy.mjs "${args[@]}" | tee deploy.log
+          {
+            echo '### Deployed'
+            echo '```'
+            cat deploy.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

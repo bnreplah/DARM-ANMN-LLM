@@ -1,6 +1,7 @@
 import { FORM_FACTORS, WORKLOADS, DEFAULT_WORKLOADS, PROFILES, guessFormFactor, isMobile, envFile, joinScript } from './kit.js';
 import { loadSettings, saveSettings, clearSettings, candidateArchives } from './settings.js';
 import { connect } from './net.js';
+import { onChainArchives } from './chain.js';
 
 const $ = (id) => document.getElementById(id);
 const storage = (kind) => {
@@ -69,7 +70,8 @@ async function start() {
   $('ready').hidden = true;
   status('Finding the network…');
   const settings = loadSettings(local, session);
-  const candidates = candidateArchives(settings, config);
+  const chainEntries = settings.archive ? [] : await onChainArchives(config.onchain ?? []);
+  const candidates = candidateArchives(settings, config, chainEntries);
   if (!candidates.length) {
     status('No default network is configured on this site. Open Settings and enter your archive URL.', 'bad');
     $('settings').open = true;
@@ -84,7 +86,7 @@ async function start() {
       ? 'You are on a phone or tablet. The phone app is the easiest way to take part; the kit below is for computers and edge boxes.'
       : 'Pick how much of this device to share, then download your kit.';
     $('n-chain').textContent = network.chain;
-    $('n-via').textContent = new URL(archive).host + (result.tried > 1 ? ' (a fallback)' : '');
+    $('n-via').textContent = new URL(archive).host + (result.via ? ` (found on-chain via ${result.via})` : result.tried > 1 ? ' (a fallback)' : '');
     $('n-genesis').textContent = network.genesis;
     $('n-validators').textContent = `${network.validators.length} genesis validator(s)`;
     $('n-height').textContent = network.height;
