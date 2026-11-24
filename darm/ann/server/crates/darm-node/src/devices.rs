@@ -465,9 +465,12 @@ impl RequestAuth {
 
 fn hex_decode(text: &str, out: &mut [u8]) -> Option<()> {
     let digits = text.as_bytes();
-    for (slot, pair) in out.iter_mut().zip(digits.chunks_exact(2)) {
-        let high = char::from(pair[0]).to_digit(16)?;
-        let low = char::from(pair[1]).to_digit(16)?;
+    if digits.len() != out.len() * 2 {
+        return None;
+    }
+    for (index, slot) in out.iter_mut().enumerate() {
+        let high = char::from(*digits.get(index * 2)?).to_digit(16)?;
+        let low = char::from(*digits.get(index * 2 + 1)?).to_digit(16)?;
         *slot = u8::try_from(high * 16 + low).ok()?;
     }
     Some(())
