@@ -8,7 +8,8 @@ import { normalizeArchive, validateInfo } from './kit.js';
  */
 export async function connect(candidates, { readToken = '', fetchFn = fetch, timeoutMs = 8000 } = {}) {
   const failures = [];
-  for (const [index, raw] of candidates.entries()) {
+  for (const [index, candidate] of candidates.entries()) {
+    const raw = typeof candidate === 'string' ? candidate : candidate.url;
     let archive;
     try {
       archive = normalizeArchive(raw);
@@ -21,7 +22,9 @@ export async function connect(candidates, { readToken = '', fetchFn = fetch, tim
       }).finally(() => clearTimeout(timer));
       if (res.status === 401 || res.status === 403) throw new Error('needs a read token');
       if (!res.ok) throw new Error(`answered ${res.status}`);
-      return { archive, network: validateInfo(await res.json()), tried: index + 1, failures };
+      const network = validateInfo(await res.json());
+      if (candidate.genesis && network.genesis !== candidate.genesis) throw new Error('genesis does not match the registry');
+      return { archive, network, tried: index + 1, failures, via: candidate.via ?? null };
     } catch (error) {
       failures.push({ archive: raw, reason: error.message });
     }

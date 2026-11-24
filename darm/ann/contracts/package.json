@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "solcjs --bin --abi --optimize --base-path . -o out src/DarmAnchor.sol",
-    "test": "node --test test/DarmAnchor.test.js"
+    "test": "node --test test/DarmAnchor.test.js test/DarmRegistry.test.js test/deploy.test.js"
   },
   "devDependencies": {
     "@ethereumjs/common": "4.4.0",

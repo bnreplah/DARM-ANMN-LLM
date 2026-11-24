@@ -4,7 +4,7 @@
 const CACHE = 'darm-companion-v1';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
   'src/bytes.js', 'src/canonical.js', 'src/hash.js', 'src/merkle.js', 'src/json.js', 'src/identity.js', 'src/protocol.js', 'src/entries.js',
-  'src/ledger.js', 'src/wallet.js', 'src/worker.js', 'src/store.js',
+  'src/ledger.js', 'src/claim.js', 'src/wallet.js', 'src/worker.js', 'src/store.js',
   'vendor/noble-hashes/_blake.js', 'vendor/noble-hashes/_md.js', 'vendor/noble-hashes/_u64.js', 'vendor/noble-hashes/blake2.js', 'vendor/noble-hashes/blake3.js', 'vendor/noble-hashes/utils.js'];
 
 self.addEventListener('install', (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));

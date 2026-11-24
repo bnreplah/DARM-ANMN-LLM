@@ -771,3 +771,43 @@ Reference vectors are in `test-vectors.json` under `companion`: a 12-block
 chain with a validator-set change at height 12, the expected balances, and
 the device messages. `companion/test/` checks the JavaScript port byte for
 byte against them.
+
+## 12. On-chain discovery (EVM)
+
+A full DARM-ANN ledger cannot run inside the EVM: Ed25519 and BLAKE3 are too
+costly to verify there. Two small contracts put the parts that benefit from a
+public, neutral database on chain. Both are keyed by the DARM chain id (§1), so
+one id names the network on every EVM chain it is deployed to.
+
+**`DarmAnchor`** anchors finalized checkpoints `(height, blockHash,
+entriesRoot)` once more than two thirds of the chain's registered validator
+accounts approve identical values (§7).
+
+**`DarmRegistry`** answers "how do I reach this network?":
+
+| Call | Who | Effect |
+|---|---|---|
+| `registerNetwork(chainId, genesis, urls)` | anyone, first wins | records the caller as admin, the genesis hash and up to 8 https archive URLs (≤ 128 bytes each) |
+| `setBootstrap(chainId, urls)` | admin | replaces the URL list and bumps `version` |
+| `transferAdmin` / `acceptAdmin` | admin / new admin | two-step admin handover |
+| `claimNode(chainId, nodeId, signature)` | any wallet | publishes that this wallet speaks for a DARM node id |
+| `networkInfo(chainId)` | view | `(admin, genesis, version, updatedAt, urls)` |
+
+Because registration is first come, first served, a client MUST pin the
+expected **admin address** (and SHOULD pin the genesis hash) obtained from the
+operator, ignore any registry entry that does not match, and still verify the
+genesis hash of the archive it reaches. A squatter then gains nothing.
+
+**Node claims.** The registry does not verify signatures. A claim carries the
+node's Ed25519 signature in the `NodeClaimed` event, and any reader checks it
+off-chain. The signed message is domain `evm-node-claim`:
+
+```
+fixed32 darm_chain ‖ fixed32 node ‖ u64 evm_chain_id ‖ bytes registry(20) ‖ bytes wallet(20)
+```
+
+so a claim cannot be replayed on another EVM chain or contract, or for
+another wallet. A claim without a valid signature is ignored.
+
+Supported test networks: Ethereum Sepolia (11155111), Base Sepolia (84532) and
+Arbitrum Sepolia (421614). The deploy script refuses any other chain id.

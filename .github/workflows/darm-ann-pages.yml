@@ -50,6 +50,8 @@ jobs:
           # Passed through the environment, never interpolated into the
           # script, so a variable's content cannot become shell code.
           DARM_MONITOR_NODES: ${{ vars.DARM_MONITOR_NODES }}
+          # JSON array of on-chain registries, printed by contracts/scripts/deploy.mjs.
+          DARM_ONCHAIN_REGISTRIES: ${{ vars.DARM_ONCHAIN_REGISTRIES }}
         run: |
           set -euo pipefail
           mkdir -p _site/companion _site/join
@@ -57,10 +59,12 @@ jobs:
           cp monitor/index.html monitor/monitor.css monitor/monitor.js monitor/model.js ../../_site/
           cp -r companion/index.html companion/app.css companion/app.js companion/sw.js \
             companion/manifest.webmanifest companion/icons companion/src companion/vendor ../../_site/companion/
-          cp join/index.html join/join.css join/join.js join/kit.js join/settings.js join/net.js ../../_site/join/
+          cp join/index.html join/join.css join/join.js join/kit.js join/settings.js join/net.js join/chain.js ../../_site/join/
           cd ../..
-          jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
-            '{nodes: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}' \
+          onchain="${DARM_ONCHAIN_REGISTRIES:-[]}"
+          echo "$onchain" | jq -e 'type == "array"' >/dev/null || { echo "DARM_ONCHAIN_REGISTRIES must be a JSON array" >&2; exit 1; }
+          jq -n --arg nodes "${DARM_MONITOR_NODES:-}" --argjson onchain "$onchain" \
+            '{nodes: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))), onchain: $onchain}' \
             > _site/config.json
           jq -n --arg nodes "${DARM_MONITOR_NODES:-}" \
             '{archive: ($nodes | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | (.[0] // ""))}' \
