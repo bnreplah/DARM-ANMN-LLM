@@ -96,6 +96,19 @@ async function start() {
   } catch {
     /* no preset archive */
   }
+  // Settings saved on the join page (same origin) take precedence.
+  for (const store of [globalThis.localStorage, globalThis.sessionStorage]) {
+    try {
+      const saved = JSON.parse(store?.getItem('darm.settings.v1') ?? 'null');
+      if (!saved) continue;
+      if (saved.archive) $('url').value = saved.archive;
+      if (saved.readToken) $('read-token').value = saved.readToken;
+      if (saved.enrollToken) $('enroll-token').value = saved.enrollToken;
+      break;
+    } catch {
+      /* unreadable settings are ignored */
+    }
+  }
   show('pair', true);
 }
 

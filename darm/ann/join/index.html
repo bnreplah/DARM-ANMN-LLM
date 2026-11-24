@@ -37,53 +37,59 @@
       <article>
         <h3>Laptop, desktop, edge box or server</h3>
         <p>Run a node that advertises your CPU or GPU to the compute pool and serves work. The starter kit below creates your key and sets the node up for this cluster.</p>
-        <p><a class="button" href="#kit">Build my starter kit</a></p>
+        <p><a class="button" href="#kit">Get my starter kit</a></p>
       </article>
     </div>
     <p class="note">Honest limits: browsers and phones can verify and audit, but only a full node runs model inference. A phone cannot contribute while it is locked or the page is closed.</p>
   </section>
 
   <section id="kit">
-    <h2>Starter kit</h2>
-    <ol class="steps">
-      <li><strong>Find your cluster.</strong> Enter the archive URL your operator gave you. This page reads it; it sends nothing.</li>
-      <li><strong>Check the genesis hash</strong> against the one your operator published. If it differs, stop: that is not your cluster.</li>
-      <li><strong>Choose what to share</strong> and download two files.</li>
-      <li><strong>Run the script.</strong> It creates your identity key on your machine (the key is never uploaded), prints your node id, and starts the node.</li>
-    </ol>
-
-    <form id="lookup" autocomplete="off">
-      <label>Archive URL <input id="archive" type="url" required placeholder="https://archive.example.org"></label>
-      <button type="submit">Look up cluster</button>
-    </form>
+    <h2>Get started</h2>
+    <p id="status" class="status" role="status">Finding the network…</p>
     <p id="error" class="error" role="alert" hidden></p>
 
-    <div id="network" hidden>
-      <dl>
-        <dt>Cluster</dt><dd id="n-chain"></dd>
-        <dt>Genesis hash</dt><dd><code id="n-genesis"></code></dd>
-        <dt>Validators</dt><dd id="n-validators"></dd>
-        <dt>Ledger height</dt><dd id="n-height"></dd>
-      </dl>
-      <form id="choices">
-        <label>Device type
-          <select id="form-factor"></select>
-        </label>
-        <fieldset><legend>Workloads to serve</legend><div id="workloads"></div></fieldset>
-        <label>Share of the device to offer: <output id="share-out">50</output>%
-          <input id="share" type="range" min="1" max="100" value="50">
-        </label>
-        <label class="row"><input id="charging" type="checkbox" checked> Only contribute while charging (recommended for battery devices)</label>
-        <p><button type="submit">Download starter kit</button></p>
-      </form>
+    <div id="ready" hidden>
+      <p class="lead" id="lead"></p>
+      <fieldset class="choices"><legend>How much should this device share?</legend>
+        <div id="profiles"></div>
+      </fieldset>
+      <p><button id="get-kit" type="button">Download my starter kit</button></p>
+
       <div id="downloads" hidden>
-        <p>Put both files in one folder, then:</p>
+        <p><strong>Two files downloaded.</strong> Put them in one folder and run:</p>
         <pre><code>chmod +x join.sh
 ./join.sh</code></pre>
-        <p>You also need <code>mesh-llm</code> and <code>darm-node</code> built from the <a href="https://github.com/bnreplah/DARM-ANMN-LLM/blob/main/darm/docs/QUICKSTART.md">quickstart</a>. Ask your operator for a mesh join token, or leave it empty to run standalone first.</p>
-        <p class="note">The files contain only public cluster settings. Your key is created locally by <code>darm-node keygen</code> and stays in <code>~/.mesh-llm/darm/identity.key</code>. Back it up: a lost key means a lost identity and its credits.</p>
+        <p>The script creates your identity key on this machine (it is never uploaded) and shows your node id. You need <code>mesh-llm</code> and <code>darm-node</code> installed first: see the <a href="https://github.com/bnreplah/DARM-ANMN-LLM/blob/main/darm/docs/QUICKSTART.md">quickstart</a>.</p>
+        <p class="note">Back up <code>~/.mesh-llm/darm/identity.key</code>. A lost key means a lost identity and its credits.</p>
       </div>
+
+      <details id="customize"><summary>Customize</summary>
+        <label>Device type <select id="form-factor"></select></label>
+        <fieldset><legend>Workloads to serve</legend><div id="workloads"></div></fieldset>
+      </details>
+
+      <details id="details"><summary>Network details</summary>
+        <dl>
+          <dt>Cluster</dt><dd id="n-chain"></dd>
+          <dt>Connected through</dt><dd id="n-via"></dd>
+          <dt>Genesis hash</dt><dd><code id="n-genesis"></code></dd>
+          <dt>Validators</dt><dd id="n-validators"></dd>
+          <dt>Ledger height</dt><dd id="n-height"></dd>
+        </dl>
+        <p class="note">Your operator can confirm the genesis hash. If it differs, this is not their cluster.</p>
+      </details>
     </div>
+
+    <details id="settings" class="settings"><summary>Settings: use my own archive</summary>
+      <p class="note">Leave this empty to use the network's default entry point. Only change it to join a private cluster.</p>
+      <form id="settings-form" autocomplete="off">
+        <label>Archive URL <input id="archive" type="url" placeholder="https://archive.example.org"></label>
+        <label>Read token <small>(only if your archive requires one)</small> <input id="read-token" type="password" autocomplete="off"></label>
+        <label>Enroll token <small>(only if your operator gave you one; used by the phone app)</small> <input id="enroll-token" type="password" autocomplete="off"></label>
+        <label class="row"><input id="remember" type="checkbox"> Remember on this device (otherwise kept for this tab only)</label>
+        <p><button type="submit">Save and reconnect</button> <button id="reset" type="button" class="secondary">Reset to default</button></p>
+      </form>
+    </details>
   </section>
 
   <section>

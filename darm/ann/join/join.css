@@ -19,3 +19,12 @@ code,pre{font:.85rem ui-monospace,monospace}pre{background:var(--panel);border:1
 .note{color:var(--dim);font-size:.9rem}.error{color:var(--bad)}
 .steps li{margin:.4rem 0}
 footer{text-align:center;color:var(--dim);padding:20px;border-top:1px solid var(--line)}
+.status{padding:.7rem .9rem;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.status.ok{border-color:var(--ok)}.status.bad{border-color:var(--bad)}
+.lead{font-size:1.05rem}
+.choices label{display:block;padding:.6rem .8rem;margin:.4rem 0;border:1px solid var(--line);border-radius:8px;color:var(--fg);cursor:pointer}
+.choices label:has(input:checked){border-color:var(--ok);background:var(--panel)}
+.choices small{display:block;color:var(--dim)}
+details{margin:1rem 0;border:1px solid var(--line);border-radius:8px;padding:.5rem .9rem}summary{cursor:pointer;color:var(--dim)}
+button.secondary{background:transparent;color:var(--fg);border:1px solid var(--line)}
+input[type=password]{display:block;width:100%;margin:.25rem 0 .5rem;padding:.7rem;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--fg);font:inherit}
