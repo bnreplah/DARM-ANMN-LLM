@@ -37,6 +37,10 @@ export function MermaidBlock({ code }: { code: string }) {
       try {
         mermaid.initialize({
           startOnLoad: false,
+          // Mermaid 12 changed the default layout engine, theme and look; pin the
+          // pre-12 rendering so existing diagrams keep their appearance.
+          layout: 'dagre',
+          look: 'classic',
           theme: resolvedTheme === 'dark' ? 'dark' : 'default',
           securityLevel: 'strict'
         })
